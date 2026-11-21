@@ -1,0 +1,59 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --nxf-bg-primary: #0D0D10;
+    --nxf-bg-elevated: #15151A;
+    --nxf-bg-surface: #202027;
+    --nxf-border-subtle: rgba(255, 255, 255, 0.08);
+    --nxf-border-strong: rgba(255, 255, 255, 0.16);
+    --nxf-crimson: #DC172B;
+    --nxf-crimson-hover: #EF3340;
+    --nxf-text-primary: #FFFFFF;
+    --nxf-text-secondary: #A1A1AA;
+    --nxf-text-muted: #71717A;
+  }
+
+  html {
+    background-color: #0D0D10;
+    color: #FFFFFF;
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: #0D0D10;
+    color: #FFFFFF;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, .font-display {
+    font-family: 'Barlow Condensed', 'Plus Jakarta Sans', sans-serif;
+    letter-spacing: -0.01em;
+  }
+
+  .font-mono-tabular {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Focus ring accessibility */
+  :focus-visible {
+    outline: 2px solid #EF3340;
+    outline-offset: 2px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

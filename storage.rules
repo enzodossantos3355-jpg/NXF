@@ -1,0 +1,42 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isCmsAuthorized() {
+      return isSignedIn()
+        && (request.auth.token.primaryAdmin == true || request.auth.token.cms == true);
+    }
+
+    function isValidImage(maxSizeBytes) {
+      return request.resource != null
+        && request.resource.size <= maxSizeBytes
+        && request.resource.contentType.matches('image/(jpeg|png|webp)');
+    }
+
+    // Avatares e banners pessoais do membro (até 5 MB)
+    match /profiles/{userId}/{fileName} {
+      allow read: if true;
+      allow write: if isSignedIn()
+        && request.auth.uid == userId
+        && fileName.size() <= 128
+        && isValidImage(5 * 1024 * 1024);
+    }
+
+    // Mídia institucional, logos de equipes, banners do CMS e patrocinadores (até 10 MB)
+    // Restrito exclusivamente a administradores/editores autorizados via Custom Claims
+    match /cms/{folder}/{fileName} {
+      allow read: if true;
+      allow write: if isCmsAuthorized()
+        && fileName.size() <= 128
+        && isValidImage(10 * 1024 * 1024);
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

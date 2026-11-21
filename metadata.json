@@ -1,0 +1,8 @@
+{
+  "name": "NXF eSports",
+  "description": "Plataforma oficial e sistema de gestão competitiva da organização NXF eSports (NEXO FURY) para Brawl Stars.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,558 @@
+{
+  "entities": {
+    "UserPrivate": {
+      "title": "UserPrivate",
+      "description": "Dados privados da conta autenticada (nome completo para coleta de dados, nick, code e papéis internos).",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "displayName": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "code": { "type": "string", "minLength": 3, "maxLength": 24 },
+        "email": { "type": "string", "maxLength": 254 },
+        "roles": { "type": "array", "description": "Lista limitada de papéis: primary_admin, delegated_admin, manager, coach, player, candidate" },
+        "delegatedPermissions": { "type": "array", "description": "Permissões granulares para administradores delegados" },
+        "teamIds": { "type": "array", "description": "IDs das equipes vinculadas" },
+        "status": { "type": "string", "enum": ["active", "suspended", "pending_verification"] },
+        "brawlTag": { "type": "string", "maxLength": 20 },
+        "brawlTagStatus": { "type": "string", "enum": ["none", "pending", "approved", "rejected"] },
+        "authProviders": { "type": "array" },
+        "hasLocalPassword": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "fullName", "displayName", "code", "roles", "status", "createdAt", "updatedAt"]
+    },
+    "AdminGrant": {
+      "title": "AdminGrant",
+      "description": "Registro autoritativo de administradores principais e delegados.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "role": { "type": "string", "enum": ["primary_admin", "delegated_admin"] },
+        "permissions": { "type": "array" },
+        "active": { "type": "boolean" },
+        "grantedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "role", "active", "grantedBy", "createdAt", "updatedAt"]
+    },
+    "PublicProfile": {
+      "title": "PublicProfile",
+      "description": "Índice público mínimo de membros oficiais sem exposição de PII.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "nickname": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "publicRole": { "type": "string", "minLength": 2, "maxLength": 40 },
+        "avatarUrl": { "type": "string", "maxLength": 1000 },
+        "bannerUrl": { "type": "string", "maxLength": 1000 },
+        "bio": { "type": "string", "maxLength": 500 },
+        "layout": { "type": "string", "enum": ["classic", "competitive", "minimal"] },
+        "teamIds": { "type": "array" },
+        "brawlTag": { "type": "string", "maxLength": 20 },
+        "brawlTagApproved": { "type": "boolean" },
+        "socialLinks": { "type": "object" },
+        "isActiveMember": { "type": "boolean" },
+        "showInEntrySelector": { "type": "boolean" },
+        "moderationStatus": { "type": "string", "enum": ["approved", "pending", "hidden"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "nickname", "publicRole", "layout", "isActiveMember", "showInEntrySelector", "moderationStatus", "createdAt", "updatedAt"]
+    },
+    "Team": {
+      "title": "Team",
+      "description": "Equipe competitiva da organização NXF eSports.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 60 },
+        "category": { "type": "string", "minLength": 2, "maxLength": 40 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "logoUrl": { "type": "string", "maxLength": 1000 },
+        "bannerUrl": { "type": "string", "maxLength": 1000 },
+        "isPublic": { "type": "boolean" },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "category", "isPublic", "active", "createdAt", "updatedAt"]
+    },
+    "TeamMembership": {
+      "title": "TeamMembership",
+      "description": "Vínculo de membro com equipe (ID determinístico {teamId}_{uid}).",
+      "type": "object",
+      "properties": {
+        "teamId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "nickname": { "type": "string", "maxLength": 32 },
+        "roleInTeam": { "type": "string", "enum": ["manager", "coach", "starter", "reserve", "analyst"] },
+        "status": { "type": "string", "enum": ["active", "inactive", "transferred"] },
+        "joinedAt": { "type": "string", "format": "date-time" },
+        "endedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["teamId", "uid", "nickname", "roleInTeam", "status", "joinedAt"]
+    },
+    "Invitation": {
+      "title": "Invitation",
+      "description": "Convite individual de uso único com expiração para vínculo organizacional por Code.",
+      "type": "object",
+      "properties": {
+        "codeHash": { "type": "string", "maxLength": 128 },
+        "targetCode": { "type": "string", "minLength": 3, "maxLength": 24 },
+        "targetEmail": { "type": "string", "maxLength": 254 },
+        "assignedRoles": { "type": "array" },
+        "teamId": { "type": "string", "maxLength": 128 },
+        "roleInTeam": { "type": "string", "enum": ["manager", "coach", "starter", "reserve", "analyst", "none"] },
+        "status": { "type": "string", "enum": ["pending", "accepted", "revoked", "expired"] },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "acceptedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["targetCode", "assignedRoles", "status", "expiresAt", "createdBy", "createdAt"]
+    },
+    "Vacancy": {
+      "title": "Vacancy",
+      "description": "Vaga aberta de recrutamento por equipe.",
+      "type": "object",
+      "properties": {
+        "teamId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "teamName": { "type": "string", "maxLength": 60 },
+        "title": { "type": "string", "minLength": 3, "maxLength": 80 },
+        "roleTarget": { "type": "string", "maxLength": 40 },
+        "requirements": { "type": "string", "maxLength": 1500 },
+        "customFields": { "type": "array" },
+        "deadline": { "type": "string", "format": "date-time" },
+        "status": { "type": "string", "enum": ["open", "closed", "archived"] },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["teamId", "teamName", "title", "roleTarget", "status", "createdBy", "createdAt", "updatedAt"]
+    },
+    "Application": {
+      "title": "Application",
+      "description": "Candidatura privada a vaga (ID {vacancyId}_{applicantUid}).",
+      "type": "object",
+      "properties": {
+        "vacancyId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "teamId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "applicantUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "applicantName": { "type": "string", "minLength": 2, "maxLength": 60 },
+        "brawlTag": { "type": "string", "maxLength": 20 },
+        "answers": { "type": "object" },
+        "stage": { "type": "string", "enum": ["recebida", "em_analise", "em_teste", "aprovada", "rejeitada"] },
+        "internalNotes": { "type": "string", "maxLength": 2000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["vacancyId", "teamId", "applicantUid", "applicantName", "stage", "createdAt", "updatedAt"]
+    },
+    "Tournament": {
+      "title": "Tournament",
+      "description": "Campeonato ou liga competitiva acompanhada pela organização.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 3, "maxLength": 100 },
+        "organizer": { "type": "string", "maxLength": 80 },
+        "format": { "type": "string", "enum": ["MD3", "MD5", "MD7", "Pontos Corridos", "Chave Dupla"] },
+        "status": { "type": "string", "enum": ["upcoming", "ongoing", "completed"] },
+        "startDate": { "type": "string", "format": "date-time" },
+        "isPublic": { "type": "boolean" },
+        "standings": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "format", "status", "isPublic", "createdAt", "updatedAt"]
+    },
+    "Match": {
+      "title": "Match",
+      "description": "Confronto competitivo inserido por responsáveis autorizados.",
+      "type": "object",
+      "properties": {
+        "tournamentId": { "type": "string", "maxLength": 128 },
+        "tournamentName": { "type": "string", "maxLength": 100 },
+        "teamId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "teamName": { "type": "string", "maxLength": 60 },
+        "opponentName": { "type": "string", "minLength": 2, "maxLength": 60 },
+        "format": { "type": "string", "enum": ["MD3", "MD5", "MD7"] },
+        "scheduledAt": { "type": "string", "format": "date-time" },
+        "status": { "type": "string", "enum": ["scheduled", "live_manual", "completed", "cancelled"] },
+        "nxfScore": { "type": "number" },
+        "opponentScore": { "type": "number" },
+        "maps": { "type": "array" },
+        "lineupUids": { "type": "array" },
+        "isPublic": { "type": "boolean" },
+        "enteredBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["teamId", "teamName", "opponentName", "format", "scheduledAt", "status", "isPublic", "enteredBy", "createdAt", "updatedAt"]
+    },
+    "Training": {
+      "title": "Training",
+      "description": "Sessão de treinamento agendada por técnico ou gerente.",
+      "type": "object",
+      "properties": {
+        "teamId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "teamName": { "type": "string", "maxLength": 60 },
+        "title": { "type": "string", "minLength": 3, "maxLength": 100 },
+        "objectives": { "type": "string", "maxLength": 1500 },
+        "scheduledAt": { "type": "string", "format": "date-time" },
+        "durationMinutes": { "type": "number" },
+        "status": { "type": "string", "enum": ["scheduled", "completed", "cancelled"] },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["teamId", "title", "scheduledAt", "status", "createdBy", "createdAt", "updatedAt"]
+    },
+    "Attendance": {
+      "title": "Attendance",
+      "description": "Confirmação e registro real de presença em treino ({trainingId}_{uid}).",
+      "type": "object",
+      "properties": {
+        "trainingId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "teamId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "nickname": { "type": "string", "maxLength": 32 },
+        "playerStatus": { "type": "string", "enum": ["pending", "confirmed", "declined"] },
+        "justification": { "type": "string", "maxLength": 400 },
+        "coachVerifiedStatus": { "type": "string", "enum": ["unmarked", "present", "absent", "justified"] },
+        "verifiedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["trainingId", "teamId", "uid", "playerStatus", "coachVerifiedStatus", "updatedAt"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "Notificação institucional do sistema para um destinatário.",
+      "type": "object",
+      "properties": {
+        "recipientUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "maxLength": 120 },
+        "body": { "type": "string", "maxLength": 500 },
+        "category": { "type": "string", "enum": ["system", "training", "match", "recruitment", "admin"] },
+        "targetRoute": { "type": "string", "maxLength": 200 },
+        "read": { "type": "boolean" },
+        "dedupKey": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["recipientUid", "title", "body", "category", "read", "createdAt"]
+    },
+    "NotificationPreference": {
+      "title": "NotificationPreference",
+      "description": "Preferências de notificação e push FCM do usuário.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "pushEnabled": { "type": "boolean" },
+        "fcmTokens": { "type": "array" },
+        "categories": { "type": "object" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "pushEnabled", "updatedAt"]
+    },
+    "PlayerStats": {
+      "title": "PlayerStats",
+      "description": "Cache oficial de estatísticas da API Brawl Stars sincronizado pelo backend.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "brawlTag": { "type": "string", "maxLength": 20 },
+        "trophies": { "type": "number" },
+        "highestTrophies": { "type": "number" },
+        "victories3v3": { "type": "number" },
+        "soloVictories": { "type": "number" },
+        "duoVictories": { "type": "number" },
+        "syncStatus": { "type": "string", "enum": ["ok", "pending_config", "error"] },
+        "lastSyncedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "brawlTag", "syncStatus", "lastSyncedAt"]
+    },
+    "PlayerStatsHistory": {
+      "title": "PlayerStatsHistory",
+      "description": "Snapshots históricos de evolução de troféus e vitórias.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "brawlTag": { "type": "string", "maxLength": 20 },
+        "trophies": { "type": "number" },
+        "victories3v3": { "type": "number" },
+        "capturedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "brawlTag", "trophies", "capturedAt"]
+    },
+    "Achievement": {
+      "title": "Achievement",
+      "description": "Conquista competitiva verificada pela organização.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "tournamentName": { "type": "string", "maxLength": 100 },
+        "placement": { "type": "string", "maxLength": 30 },
+        "teamId": { "type": "string", "maxLength": 128 },
+        "achievedAt": { "type": "string", "format": "date-time" },
+        "isPublic": { "type": "boolean" },
+        "createdBy": { "type": "string", "maxLength": 128 }
+      },
+      "required": ["title", "placement", "isPublic", "achievedAt", "createdBy"]
+    },
+    "SiteContent": {
+      "title": "SiteContent",
+      "description": "Configuração pública do portal gerenciada no NXF Studio CMS.",
+      "type": "object",
+      "properties": {
+        "heroTitle": { "type": "string", "maxLength": 140 },
+        "heroSubtitle": { "type": "string", "maxLength": 400 },
+        "heroDesktopImage": { "type": "string", "maxLength": 1000 },
+        "heroMobileImage": { "type": "string", "maxLength": 1000 },
+        "heroPrimaryCtaLabel": { "type": "string", "maxLength": 40 },
+        "heroPrimaryCtaTo": { "type": "string", "maxLength": 120 },
+        "brandLogoUrl": { "type": "string", "maxLength": 1000 },
+        "aboutTitle": { "type": "string", "maxLength": 120 },
+        "aboutBody": { "type": "string", "maxLength": 4000 },
+        "socialLinks": { "type": "object" },
+        "sectionOrder": { "type": "array" },
+        "visibleSections": { "type": "object" },
+        "version": { "type": "number" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["heroTitle", "heroSubtitle", "version", "updatedBy", "updatedAt"]
+    },
+    "NewsArticle": {
+      "title": "NewsArticle",
+      "description": "Matéria editorial e comunicados públicos do portal NXF.",
+      "type": "object",
+      "properties": {
+        "slug": { "type": "string", "minLength": 2, "maxLength": 120, "pattern": "^[a-z0-9\\-]+$" },
+        "title": { "type": "string", "minLength": 3, "maxLength": 140 },
+        "summary": { "type": "string", "maxLength": 300 },
+        "content": { "type": "string", "maxLength": 20000 },
+        "coverImageUrl": { "type": "string", "maxLength": 1000 },
+        "category": { "type": "string", "maxLength": 40 },
+        "status": { "type": "string", "enum": ["draft", "scheduled", "published"] },
+        "publishedAt": { "type": "string", "format": "date-time" },
+        "authorUid": { "type": "string", "maxLength": 128 },
+        "authorName": { "type": "string", "maxLength": 60 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["slug", "title", "summary", "content", "status", "authorUid", "createdAt", "updatedAt"]
+    },
+    "MediaAsset": {
+      "title": "MediaAsset",
+      "description": "Metadados de ativos de mídia enviados ao Firebase Storage.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 100 },
+        "url": { "type": "string", "maxLength": 1000 },
+        "storagePath": { "type": "string", "maxLength": 500 },
+        "mimeType": { "type": "string", "maxLength": 60 },
+        "sizeBytes": { "type": "number" },
+        "uploadedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["url", "storagePath", "mimeType", "uploadedBy", "createdAt"]
+    },
+    "Sponsor": {
+      "title": "Sponsor",
+      "description": "Patrocinador ou parceiro oficial exibido no portal.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "tier": { "type": "string", "maxLength": 40 },
+        "logoUrl": { "type": "string", "maxLength": 1000 },
+        "websiteUrl": { "type": "string", "maxLength": 500 },
+        "active": { "type": "boolean" },
+        "order": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "active", "createdAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Registro imutável de auditoria administrativa e segurança.",
+      "type": "object",
+      "properties": {
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "actorLabel": { "type": "string", "maxLength": 80 },
+        "action": { "type": "string", "maxLength": 80 },
+        "entityType": { "type": "string", "maxLength": 50 },
+        "entityId": { "type": "string", "maxLength": 128 },
+        "summary": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["actorUid", "action", "entityType", "entityId", "summary", "createdAt"]
+    },
+    "ActivityFeedItem": {
+      "title": "ActivityFeedItem",
+      "description": "Eventos internos recentes na central de atividades da organização.",
+      "type": "object",
+      "properties": {
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 120 },
+        "scope": { "type": "string", "enum": ["org", "team", "system"] },
+        "teamId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["actorUid", "title", "scope", "createdAt"]
+    },
+    "SupportTicket": {
+      "title": "SupportTicket",
+      "description": "Ticket técnico de suporte (não é chat entre membros).",
+      "type": "object",
+      "properties": {
+        "requesterUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "requesterName": { "type": "string", "maxLength": 60 },
+        "subject": { "type": "string", "minLength": 4, "maxLength": 120 },
+        "category": { "type": "string", "enum": ["acesso", "bug", "brawl_tag", "integracao", "outro"] },
+        "description": { "type": "string", "minLength": 10, "maxLength": 2000 },
+        "status": { "type": "string", "enum": ["aberto", "em_andamento", "resolvido"] },
+        "adminResolution": { "type": "string", "maxLength": 1500 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["requesterUid", "subject", "category", "description", "status", "createdAt", "updatedAt"]
+    },
+    "SystemSettings": {
+      "title": "SystemSettings",
+      "description": "Configurações globais de módulos e estado de integrações externas.",
+      "type": "object",
+      "properties": {
+        "enabledModules": { "type": "object" },
+        "brawlApiSyncIntervalHours": { "type": "number" },
+        "brawlApiConfigured": { "type": "boolean" },
+        "cloudFunctionsConfigured": { "type": "boolean" },
+        "primaryAdminCount": { "type": "number" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["enabledModules", "updatedBy", "updatedAt"]
+    },
+    "BackupJob": {
+      "title": "BackupJob",
+      "description": "Registro real de exportação/restauração do Firestore/Storage.",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["export", "restore"] },
+        "status": { "type": "string", "enum": ["pending_config", "queued", "completed", "failed"] },
+        "operationName": { "type": "string", "maxLength": 300 },
+        "requestedBy": { "type": "string", "maxLength": 128 },
+        "notes": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["type", "status", "requestedBy", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserPrivate" },
+      "description": "Documentos privados de contas de usuário (PII isolado)."
+    },
+    "/admins/{userId}": {
+      "schema": { "$ref": "#/entities/AdminGrant" },
+      "description": "Autoridade administrativa principal e delegada."
+    },
+    "/publicProfiles/{profileId}": {
+      "schema": { "$ref": "#/entities/PublicProfile" },
+      "description": "Perfis públicos de membros oficiais sem PII."
+    },
+    "/teams/{teamId}": {
+      "schema": { "$ref": "#/entities/Team" },
+      "description": "Equipes competitivas da organização."
+    },
+    "/teamMemberships/{membershipId}": {
+      "schema": { "$ref": "#/entities/TeamMembership" },
+      "description": "Vínculos e histórico de elenco por equipe."
+    },
+    "/invitations/{invitationId}": {
+      "schema": { "$ref": "#/entities/Invitation" },
+      "description": "Convites individuais de uso único."
+    },
+    "/vacancies/{vacancyId}": {
+      "schema": { "$ref": "#/entities/Vacancy" },
+      "description": "Vagas de recrutamento."
+    },
+    "/applications/{applicationId}": {
+      "schema": { "$ref": "#/entities/Application" },
+      "description": "Candidaturas privadas por vaga e usuário."
+    },
+    "/tournaments/{tournamentId}": {
+      "schema": { "$ref": "#/entities/Tournament" },
+      "description": "Campeonatos e classificações."
+    },
+    "/matches/{matchId}": {
+      "schema": { "$ref": "#/entities/Match" },
+      "description": "Partidas e placares competitivos."
+    },
+    "/trainings/{trainingId}": {
+      "schema": { "$ref": "#/entities/Training" },
+      "description": "Agendamentos de treino por equipe."
+    },
+    "/attendance/{attendanceId}": {
+      "schema": { "$ref": "#/entities/Attendance" },
+      "description": "Presença confirmada e verificada em treinos."
+    },
+    "/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/Notification" },
+      "description": "Notificações do sistema por usuário."
+    },
+    "/notificationPreferences/{userId}": {
+      "schema": { "$ref": "#/entities/NotificationPreference" },
+      "description": "Preferências de push FCM."
+    },
+    "/playerStats/{uid}": {
+      "schema": { "$ref": "#/entities/PlayerStats" },
+      "description": "Cache oficial da API Brawl Stars."
+    },
+    "/playerStatsHistory/{snapshotId}": {
+      "schema": { "$ref": "#/entities/PlayerStatsHistory" },
+      "description": "Snapshots históricos de estatísticas."
+    },
+    "/achievements/{achievementId}": {
+      "schema": { "$ref": "#/entities/Achievement" },
+      "description": "Conquistas verificadas da organização."
+    },
+    "/siteContent/{contentId}": {
+      "schema": { "$ref": "#/entities/SiteContent" },
+      "description": "Conteúdo do portal público (NXF Studio CMS)."
+    },
+    "/news/{articleId}": {
+      "schema": { "$ref": "#/entities/NewsArticle" },
+      "description": "Notícias do portal público."
+    },
+    "/media/{mediaId}": {
+      "schema": { "$ref": "#/entities/MediaAsset" },
+      "description": "Catálogo de mídia do NXF Studio."
+    },
+    "/sponsors/{sponsorId}": {
+      "schema": { "$ref": "#/entities/Sponsor" },
+      "description": "Patrocinadores oficiais."
+    },
+    "/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Trilha de auditoria administrativa."
+    },
+    "/activityFeed/{activityId}": {
+      "schema": { "$ref": "#/entities/ActivityFeedItem" },
+      "description": "Central de atividades internas."
+    },
+    "/supportTickets/{ticketId}": {
+      "schema": { "$ref": "#/entities/SupportTicket" },
+      "description": "Tickets técnicos de suporte."
+    },
+    "/systemSettings/{settingId}": {
+      "schema": { "$ref": "#/entities/SystemSettings" },
+      "description": "Configurações globais de módulos e sistema."
+    },
+    "/backupJobs/{jobId}": {
+      "schema": { "$ref": "#/entities/BackupJob" },
+      "description": "Histórico real de exportações e restaurações."
+    }
+  }
+}

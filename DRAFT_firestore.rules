@@ -1,0 +1,1076 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================================
+    // Global Safety Net & Explicitly Blocked Legacy Collections
+    // =========================================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    match /app_settings/{document} {
+      allow read, write: if false;
+    }
+
+    match /sent_offers/{document} {
+      allow read, write: if false;
+    }
+
+    match /mediaBlobs/{blobId} {
+      allow read, write: if false;
+    }
+
+    match /systemJobs/{jobId} {
+      allow read, write: if false;
+    }
+
+    // Health check document used exclusively by testConnection() at startup
+    match /test/connection {
+      allow get: if true;
+      allow list, write: if false;
+    }
+
+    // =========================================================================
+    // Primitive Helpers (Zero-Trust Identity & Path Validation)
+    // =========================================================================
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn();
+    }
+
+    function hasAdminDoc() {
+      return isVerifiedUser() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function adminDoc() {
+      return get(/databases/$(database)/documents/admins/$(request.auth.uid)).data;
+    }
+
+    function isPrimaryAdmin() {
+      return hasAdminDoc()
+        && adminDoc().role == 'primary_admin'
+        && adminDoc().active == true;
+    }
+
+    function hasDelegatedPermission(perm) {
+      return hasAdminDoc()
+        && adminDoc().active == true
+        && adminDoc().role == 'delegated_admin'
+        && adminDoc().permissions is list
+        && adminDoc().permissions.size() <= 30
+        && perm in adminDoc().permissions;
+    }
+
+    function isAnyAdmin() {
+      return hasAdminDoc()
+        && adminDoc().active == true
+        && adminDoc().role in ['primary_admin', 'delegated_admin'];
+    }
+
+    function hasUserDoc() {
+      return isVerifiedUser() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function currentUserDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isActiveUserWithRole(role) {
+      return hasUserDoc()
+        && currentUserDoc().status == 'active'
+        && currentUserDoc().roles is list
+        && currentUserDoc().roles.size() <= 10
+        && role in currentUserDoc().roles;
+    }
+
+    function isOfficialMember() {
+      return isAnyAdmin()
+        || (
+          hasUserDoc()
+          && currentUserDoc().status == 'active'
+          && currentUserDoc().roles is list
+          && currentUserDoc().roles.size() <= 10
+          && currentUserDoc().roles.hasAny(['primary_admin', 'delegated_admin', 'manager', 'coach', 'player'])
+        );
+    }
+
+    function isTeamMemberWithRole(teamId, allowedRoles) {
+      return isVerifiedUser()
+        && isValidId(teamId)
+        && exists(/databases/$(database)/documents/teamMemberships/$(teamId + '_' + request.auth.uid))
+        && get(/databases/$(database)/documents/teamMemberships/$(teamId + '_' + request.auth.uid)).data.status == 'active'
+        && get(/databases/$(database)/documents/teamMemberships/$(teamId + '_' + request.auth.uid)).data.roleInTeam in allowedRoles;
+    }
+
+    function canManageTeam(teamId) {
+      return isPrimaryAdmin()
+        || hasDelegatedPermission('teams.manage')
+        || (isActiveUserWithRole('manager') && isTeamMemberWithRole(teamId, ['manager']))
+        || (isActiveUserWithRole('coach') && isTeamMemberWithRole(teamId, ['coach', 'manager']));
+    }
+
+    function isOptionalString(data, field, maxLen) {
+      return !(field in data) || (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    function isNonEmptyString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    // =========================================================================
+    // Entity Validation Blueprints (Anti-Update-Gap)
+    // =========================================================================
+    function isValidUserPrivate(data) {
+      return data.keys().hasAll(['uid', 'fullName', 'displayName', 'code', 'roles', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'uid', 'fullName', 'displayName', 'code', 'email', 'roles', 'delegatedPermissions',
+          'teamIds', 'status', 'brawlTag', 'brawlTagStatus', 'authProviders',
+          'hasLocalPassword', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && isNonEmptyString(data.fullName, 2, 80)
+        && isNonEmptyString(data.displayName, 2, 32)
+        && isNonEmptyString(data.code, 3, 24)
+        && isOptionalString(data, 'email', 254)
+        && data.roles is list && data.roles.size() >= 1 && data.roles.size() <= 6
+        && data.roles.hasOnly(['primary_admin', 'delegated_admin', 'manager', 'coach', 'player', 'candidate'])
+        && data.status in ['active', 'suspended', 'pending_verification']
+        && (!('delegatedPermissions' in data) || (data.delegatedPermissions is list && data.delegatedPermissions.size() <= 30))
+        && (!('teamIds' in data) || (data.teamIds is list && data.teamIds.size() <= 20))
+        && (!('authProviders' in data) || (data.authProviders is list && data.authProviders.size() <= 5))
+        && (!('hasLocalPassword' in data) || data.hasLocalPassword is bool)
+        && (!('brawlTagStatus' in data) || data.brawlTagStatus in ['none', 'pending', 'approved', 'rejected'])
+        && isOptionalString(data, 'brawlTag', 20)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPublicProfile(data) {
+      return data.keys().hasAll([
+          'uid', 'nickname', 'publicRole', 'layout', 'isActiveMember',
+          'showInEntrySelector', 'moderationStatus', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'nickname', 'publicRole', 'avatarUrl', 'bannerUrl', 'bio',
+          'layout', 'teamIds', 'brawlTag', 'brawlTagApproved', 'socialLinks',
+          'isActiveMember', 'showInEntrySelector', 'moderationStatus',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && isNonEmptyString(data.nickname, 2, 32)
+        && isNonEmptyString(data.publicRole, 2, 40)
+        && isOptionalString(data, 'avatarUrl', 1000)
+        && isOptionalString(data, 'bannerUrl', 1000)
+        && isOptionalString(data, 'bio', 500)
+        && data.layout in ['classic', 'competitive', 'minimal']
+        && (!('teamIds' in data) || (data.teamIds is list && data.teamIds.size() <= 20))
+        && isOptionalString(data, 'brawlTag', 20)
+        && (!('brawlTagApproved' in data) || data.brawlTagApproved is bool)
+        && (!('socialLinks' in data) || (data.socialLinks is map && data.socialLinks.keys().size() <= 8))
+        && data.isActiveMember is bool
+        && data.showInEntrySelector is bool
+        && data.moderationStatus in ['approved', 'pending', 'hidden']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTeam(data) {
+      return data.keys().hasAll(['id', 'name', 'category', 'isPublic', 'active', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'name', 'category', 'description', 'logoUrl', 'bannerUrl', 'isPublic', 'active', 'createdAt', 'updatedAt'])
+        && isValidId(data.id)
+        && isNonEmptyString(data.name, 2, 60)
+        && isNonEmptyString(data.category, 2, 40)
+        && isOptionalString(data, 'description', 1000)
+        && isOptionalString(data, 'logoUrl', 1000)
+        && isOptionalString(data, 'bannerUrl', 1000)
+        && data.isPublic is bool
+        && data.active is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTeamMembership(data) {
+      return data.keys().hasAll(['teamId', 'uid', 'nickname', 'roleInTeam', 'status', 'joinedAt'])
+        && data.keys().hasOnly(['teamId', 'uid', 'nickname', 'roleInTeam', 'status', 'joinedAt', 'endedAt'])
+        && isValidId(data.teamId)
+        && isValidId(data.uid)
+        && isNonEmptyString(data.nickname, 2, 32)
+        && data.roleInTeam in ['manager', 'coach', 'starter', 'reserve', 'analyst']
+        && data.status in ['active', 'inactive', 'transferred']
+        && data.joinedAt is timestamp
+        && (!('endedAt' in data) || data.endedAt is timestamp);
+    }
+
+    function isValidVacancy(data) {
+      return data.keys().hasAll(['teamId', 'teamName', 'title', 'roleTarget', 'status', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['teamId', 'teamName', 'title', 'roleTarget', 'requirements', 'customFields', 'deadline', 'status', 'createdBy', 'createdAt', 'updatedAt'])
+        && isValidId(data.teamId)
+        && isNonEmptyString(data.teamName, 2, 60)
+        && isNonEmptyString(data.title, 3, 80)
+        && isNonEmptyString(data.roleTarget, 2, 40)
+        && isOptionalString(data, 'requirements', 1500)
+        && (!('customFields' in data) || (data.customFields is list && data.customFields.size() <= 10))
+        && (!('deadline' in data) || data.deadline is timestamp)
+        && data.status in ['open', 'closed', 'archived']
+        && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidApplication(data) {
+      return data.keys().hasAll(['vacancyId', 'teamId', 'applicantUid', 'applicantName', 'stage', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['vacancyId', 'teamId', 'applicantUid', 'applicantName', 'brawlTag', 'answers', 'stage', 'internalNotes', 'createdAt', 'updatedAt'])
+        && isValidId(data.vacancyId)
+        && isValidId(data.teamId)
+        && isValidId(data.applicantUid)
+        && isNonEmptyString(data.applicantName, 2, 60)
+        && isOptionalString(data, 'brawlTag', 20)
+        && (!('answers' in data) || (data.answers is map && data.answers.keys().size() <= 15))
+        && data.stage in ['recebida', 'em_analise', 'em_teste', 'aprovada', 'rejeitada']
+        && isOptionalString(data, 'internalNotes', 2000)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTournament(data) {
+      return data.keys().hasAll(['name', 'format', 'status', 'isPublic', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['name', 'organizer', 'format', 'status', 'startDate', 'isPublic', 'standings', 'createdAt', 'updatedAt'])
+        && isNonEmptyString(data.name, 3, 100)
+        && isOptionalString(data, 'organizer', 80)
+        && data.format in ['MD3', 'MD5', 'MD7', 'Pontos Corridos', 'Chave Dupla']
+        && data.status in ['upcoming', 'ongoing', 'completed']
+        && (!('startDate' in data) || data.startDate is timestamp)
+        && data.isPublic is bool
+        && (!('standings' in data) || (data.standings is list && data.standings.size() <= 32))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMatch(data) {
+      return data.keys().hasAll(['teamId', 'teamName', 'opponentName', 'format', 'scheduledAt', 'status', 'isPublic', 'enteredBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'tournamentId', 'tournamentName', 'teamId', 'teamName', 'opponentName',
+          'format', 'scheduledAt', 'status', 'nxfScore', 'opponentScore',
+          'maps', 'lineupUids', 'isPublic', 'enteredBy', 'createdAt', 'updatedAt'
+        ])
+        && isOptionalString(data, 'tournamentId', 128)
+        && isOptionalString(data, 'tournamentName', 100)
+        && isValidId(data.teamId)
+        && isNonEmptyString(data.teamName, 2, 60)
+        && isNonEmptyString(data.opponentName, 2, 60)
+        && data.format in ['MD3', 'MD5', 'MD7']
+        && data.scheduledAt is timestamp
+        && data.status in ['scheduled', 'live_manual', 'completed', 'cancelled']
+        && (!('nxfScore' in data) || (data.nxfScore is number && data.nxfScore >= 0 && data.nxfScore <= 10))
+        && (!('opponentScore' in data) || (data.opponentScore is number && data.opponentScore >= 0 && data.opponentScore <= 10))
+        && (!('maps' in data) || (data.maps is list && data.maps.size() <= 7))
+        && (!('lineupUids' in data) || (data.lineupUids is list && data.lineupUids.size() <= 10))
+        && data.isPublic is bool
+        && isValidId(data.enteredBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTraining(data) {
+      return data.keys().hasAll(['teamId', 'title', 'scheduledAt', 'status', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['teamId', 'teamName', 'title', 'objectives', 'scheduledAt', 'durationMinutes', 'status', 'createdBy', 'createdAt', 'updatedAt'])
+        && isValidId(data.teamId)
+        && isOptionalString(data, 'teamName', 60)
+        && isNonEmptyString(data.title, 3, 100)
+        && isOptionalString(data, 'objectives', 1500)
+        && data.scheduledAt is timestamp
+        && (!('durationMinutes' in data) || (data.durationMinutes is number && data.durationMinutes >= 15 && data.durationMinutes <= 480))
+        && data.status in ['scheduled', 'completed', 'cancelled']
+        && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAttendance(data) {
+      return data.keys().hasAll(['trainingId', 'teamId', 'uid', 'playerStatus', 'coachVerifiedStatus', 'updatedAt'])
+        && data.keys().hasOnly(['trainingId', 'teamId', 'uid', 'nickname', 'playerStatus', 'justification', 'coachVerifiedStatus', 'verifiedBy', 'updatedAt'])
+        && isValidId(data.trainingId)
+        && isValidId(data.teamId)
+        && isValidId(data.uid)
+        && isOptionalString(data, 'nickname', 32)
+        && data.playerStatus in ['pending', 'confirmed', 'declined']
+        && isOptionalString(data, 'justification', 400)
+        && data.coachVerifiedStatus in ['unmarked', 'present', 'absent', 'justified']
+        && isOptionalString(data, 'verifiedBy', 128)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['recipientUid', 'title', 'body', 'category', 'read', 'createdAt'])
+        && data.keys().hasOnly(['recipientUid', 'title', 'body', 'category', 'targetRoute', 'read', 'dedupKey', 'createdAt'])
+        && isValidId(data.recipientUid)
+        && isNonEmptyString(data.title, 1, 120)
+        && isNonEmptyString(data.body, 1, 500)
+        && data.category in ['system', 'training', 'match', 'recruitment', 'admin']
+        && isOptionalString(data, 'targetRoute', 200)
+        && data.read is bool
+        && isOptionalString(data, 'dedupKey', 128)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidNotificationPreference(data) {
+      return data.keys().hasAll(['uid', 'pushEnabled', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'pushEnabled', 'fcmTokens', 'categories', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.pushEnabled is bool
+        && (!('fcmTokens' in data) || (data.fcmTokens is list && data.fcmTokens.size() <= 10))
+        && (!('categories' in data) || (data.categories is map && data.categories.keys().size() <= 10))
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAchievement(data) {
+      return data.keys().hasAll(['title', 'placement', 'isPublic', 'achievedAt', 'createdBy'])
+        && data.keys().hasOnly(['title', 'tournamentName', 'placement', 'teamId', 'achievedAt', 'isPublic', 'createdBy'])
+        && isNonEmptyString(data.title, 2, 100)
+        && isOptionalString(data, 'tournamentName', 100)
+        && isNonEmptyString(data.placement, 1, 30)
+        && isOptionalString(data, 'teamId', 128)
+        && data.achievedAt is timestamp
+        && data.isPublic is bool
+        && isValidId(data.createdBy);
+    }
+
+    function isValidSiteContent(data) {
+      return data.keys().hasAll(['heroTitle', 'heroSubtitle', 'version', 'updatedBy', 'updatedAt'])
+        && data.keys().hasOnly([
+          'heroTitle', 'heroSubtitle', 'heroDesktopImage', 'heroMobileImage',
+          'heroPrimaryCtaLabel', 'heroPrimaryCtaTo', 'brandLogoUrl',
+          'aboutTitle', 'aboutBody', 'socialLinks', 'sectionOrder',
+          'visibleSections', 'version', 'updatedBy', 'updatedAt'
+        ])
+        && isNonEmptyString(data.heroTitle, 2, 140)
+        && isNonEmptyString(data.heroSubtitle, 2, 400)
+        && isOptionalString(data, 'heroDesktopImage', 1000)
+        && isOptionalString(data, 'heroMobileImage', 1000)
+        && isOptionalString(data, 'heroPrimaryCtaLabel', 40)
+        && isOptionalString(data, 'heroPrimaryCtaTo', 120)
+        && isOptionalString(data, 'brandLogoUrl', 1000)
+        && isOptionalString(data, 'aboutTitle', 120)
+        && isOptionalString(data, 'aboutBody', 4000)
+        && (!('socialLinks' in data) || (data.socialLinks is map && data.socialLinks.keys().size() <= 10))
+        && (!('sectionOrder' in data) || (data.sectionOrder is list && data.sectionOrder.size() <= 12))
+        && (!('visibleSections' in data) || (data.visibleSections is map && data.visibleSections.keys().size() <= 12))
+        && data.version is number && data.version >= 1
+        && isValidId(data.updatedBy)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidNews(data) {
+      return data.keys().hasAll(['slug', 'title', 'summary', 'content', 'status', 'authorUid', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'slug', 'title', 'summary', 'content', 'coverImageUrl', 'category',
+          'status', 'publishedAt', 'authorUid', 'authorName', 'createdAt', 'updatedAt'
+        ])
+        && data.slug is string && data.slug.size() >= 2 && data.slug.size() <= 120 && data.slug.matches('^[a-z0-9\\-]+$')
+        && isNonEmptyString(data.title, 3, 140)
+        && isNonEmptyString(data.summary, 3, 300)
+        && isNonEmptyString(data.content, 5, 20000)
+        && isOptionalString(data, 'coverImageUrl', 1000)
+        && isOptionalString(data, 'category', 40)
+        && data.status in ['draft', 'scheduled', 'published']
+        && (!('publishedAt' in data) || data.publishedAt is timestamp)
+        && isValidId(data.authorUid)
+        && isOptionalString(data, 'authorName', 60)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMedia(data) {
+      return data.keys().hasAll(['url', 'storagePath', 'mimeType', 'uploadedBy', 'createdAt'])
+        && data.keys().hasOnly(['title', 'url', 'storagePath', 'mimeType', 'sizeBytes', 'uploadedBy', 'createdAt'])
+        && isOptionalString(data, 'title', 100)
+        && isNonEmptyString(data.url, 5, 1000)
+        && isNonEmptyString(data.storagePath, 3, 500)
+        && isNonEmptyString(data.mimeType, 3, 60)
+        && (!('sizeBytes' in data) || (data.sizeBytes is number && data.sizeBytes >= 0 && data.sizeBytes <= 20971520))
+        && isValidId(data.uploadedBy)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidSponsor(data) {
+      return data.keys().hasAll(['name', 'active', 'createdAt'])
+        && data.keys().hasOnly(['name', 'tier', 'logoUrl', 'websiteUrl', 'active', 'order', 'createdAt'])
+        && isNonEmptyString(data.name, 2, 80)
+        && isOptionalString(data, 'tier', 40)
+        && isOptionalString(data, 'logoUrl', 1000)
+        && isOptionalString(data, 'websiteUrl', 500)
+        && data.active is bool
+        && (!('order' in data) || data.order is number)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidActivityItem(data) {
+      return data.keys().hasAll(['actorUid', 'title', 'scope', 'createdAt'])
+        && data.keys().hasOnly(['actorUid', 'title', 'scope', 'teamId', 'createdAt'])
+        && isValidId(data.actorUid)
+        && isNonEmptyString(data.title, 2, 120)
+        && data.scope in ['org', 'team', 'system']
+        && isOptionalString(data, 'teamId', 128)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidSupportTicket(data) {
+      return data.keys().hasAll(['requesterUid', 'subject', 'category', 'description', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['requesterUid', 'requesterName', 'subject', 'category', 'description', 'status', 'adminResolution', 'createdAt', 'updatedAt'])
+        && isValidId(data.requesterUid)
+        && isOptionalString(data, 'requesterName', 60)
+        && isNonEmptyString(data.subject, 4, 120)
+        && data.category in ['acesso', 'bug', 'brawl_tag', 'integracao', 'outro']
+        && isNonEmptyString(data.description, 10, 2000)
+        && data.status in ['aberto', 'em_andamento', 'resolvido']
+        && isOptionalString(data, 'adminResolution', 1500)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // =========================================================================
+    // 1. users (PII Isolado - Escrita privilegiada exclusiva via Backend Admin SDK)
+    // =========================================================================
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isSignedIn() && (
+        request.auth.uid == userId
+        || isPrimaryAdmin()
+        || hasDelegatedPermission('users.read')
+      );
+
+      allow list: if isSignedIn() && (
+        resource.data.uid == request.auth.uid
+        || isPrimaryAdmin()
+        || hasDelegatedPermission('users.read')
+      );
+
+      // Autocadastro público cria exclusivamente conta básica ['candidate']
+      allow create: if isValidId(userId)
+        && isSignedIn()
+        && request.auth.uid == userId
+        && isValidUserPrivate(incoming())
+        && incoming().uid == request.auth.uid
+        && incoming().roles == ['candidate']
+        && incoming().status in ['active', 'pending_verification']
+        && (!('delegatedPermissions' in incoming()) || incoming().delegatedPermissions.size() == 0)
+        && (!('teamIds' in incoming()) || incoming().teamIds.size() == 0)
+        && (!('brawlTagStatus' in incoming()) || incoming().brawlTagStatus in ['none', 'pending'])
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      // Usuário só atualiza dados cadastrais básicos; cargos e aprovação de Tag são exclusivos do Backend Render
+      allow update: if isValidId(userId)
+        && isVerifiedUser()
+        && request.auth.uid == userId
+        && isValidUserPrivate(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'displayName', 'brawlTag', 'brawlTagStatus', 'hasLocalPassword', 'updatedAt'])
+        && (!('brawlTagStatus' in incoming()) || incoming().brawlTagStatus in ['none', 'pending']);
+
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // 2. admins (Autoridade Administrativa - Escrita exclusiva via Backend Admin SDK)
+    // =========================================================================
+    match /admins/{userId} {
+      allow get: if isValidId(userId) && isVerifiedUser() && (
+        request.auth.uid == userId || isPrimaryAdmin()
+      );
+
+      allow list: if isSignedIn() && (
+        resource.data.uid == request.auth.uid || isPrimaryAdmin()
+      );
+
+      allow create, update, delete: if false;
+    }
+
+    // =========================================================================
+    // 3. publicProfiles (Índice público sem PII)
+    // =========================================================================
+    match /publicProfiles/{profileId} {
+      allow get: if isValidId(profileId) && (
+        (resource.data.isActiveMember == true && resource.data.moderationStatus == 'approved')
+        || (isSignedIn() && request.auth.uid == profileId)
+        || isAnyAdmin()
+      );
+
+      allow list: if (
+        (resource.data.isActiveMember == true && resource.data.moderationStatus == 'approved')
+        || (isSignedIn() && resource.data.uid == request.auth.uid)
+        || isAnyAdmin()
+      );
+
+      // Criação/remoção de perfis oficiais ocorre exclusivamente via Backend Admin SDK
+      allow create, delete: if false;
+
+      allow update: if isValidId(profileId)
+        && isVerifiedUser()
+        && isValidPublicProfile(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isPrimaryAdmin()
+          || hasDelegatedPermission('users.manage')
+          || (
+            request.auth.uid == profileId
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'avatarUrl', 'bannerUrl', 'bio', 'layout', 'socialLinks',
+              'showInEntrySelector', 'brawlTag', 'updatedAt'
+            ])
+          )
+        );
+    }
+
+    // =========================================================================
+    // 4. teams & teamMemberships (Contas básicas não leem equipes privadas)
+    // =========================================================================
+    match /teams/{teamId} {
+      allow get: if isValidId(teamId) && (
+        resource.data.isPublic == true || isOfficialMember()
+      );
+
+      allow list: if resource.data.isPublic == true || isOfficialMember();
+
+      allow create: if isValidId(teamId)
+        && isVerifiedUser()
+        && isValidTeam(incoming())
+        && incoming().id == teamId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (isPrimaryAdmin() || hasDelegatedPermission('teams.manage'));
+
+      allow update: if isValidId(teamId)
+        && isVerifiedUser()
+        && isValidTeam(incoming())
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && canManageTeam(teamId);
+
+      allow delete: if isValidId(teamId) && isPrimaryAdmin();
+    }
+
+    match /teamMemberships/{membershipId} {
+      allow get: if isValidId(membershipId) && (
+        resource.data.status == 'active'
+        || (isSignedIn() && resource.data.uid == request.auth.uid)
+        || isAnyAdmin()
+      );
+
+      allow list: if (
+        resource.data.status == 'active'
+        || (isSignedIn() && resource.data.uid == request.auth.uid)
+        || isAnyAdmin()
+      );
+
+      allow create: if isValidId(membershipId)
+        && isVerifiedUser()
+        && isValidTeamMembership(incoming())
+        && membershipId == incoming().teamId + '_' + incoming().uid
+        && exists(/databases/$(database)/documents/teams/$(incoming().teamId))
+        && incoming().joinedAt == request.time
+        && canManageTeam(incoming().teamId);
+
+      allow update: if isValidId(membershipId)
+        && isVerifiedUser()
+        && isValidTeamMembership(incoming())
+        && incoming().teamId == existing().teamId
+        && incoming().uid == existing().uid
+        && incoming().joinedAt == existing().joinedAt
+        && canManageTeam(existing().teamId);
+
+      allow delete: if isValidId(membershipId) && isPrimaryAdmin();
+    }
+
+    // =========================================================================
+    // 5. invitations (Criação, listagem e aceite transacional exclusivos via Backend Render)
+    // =========================================================================
+    match /invitations/{invitationId} {
+      allow get: if isValidId(invitationId) && isVerifiedUser() && (
+        isAnyAdmin()
+        || (hasUserDoc() && resource.data.targetCode == currentUserDoc().code)
+      );
+
+      allow list: if isVerifiedUser() && isAnyAdmin();
+
+      allow create, update, delete: if false;
+    }
+
+    // =========================================================================
+    // 6. vacancies & applications (Contas básicas leem apenas vagas abertas e próprias candidaturas)
+    // =========================================================================
+    match /vacancies/{vacancyId} {
+      allow get: if isValidId(vacancyId) && (
+        resource.data.status == 'open' || isOfficialMember()
+      );
+
+      allow list: if resource.data.status == 'open' || isOfficialMember();
+
+      allow create: if isValidId(vacancyId)
+        && isVerifiedUser()
+        && isValidVacancy(incoming())
+        && incoming().createdBy == request.auth.uid
+        && exists(/databases/$(database)/documents/teams/$(incoming().teamId))
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (canManageTeam(incoming().teamId) || hasDelegatedPermission('recruitment.manage'));
+
+      allow update: if isValidId(vacancyId)
+        && isVerifiedUser()
+        && isValidVacancy(incoming())
+        && incoming().teamId == existing().teamId
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (canManageTeam(existing().teamId) || hasDelegatedPermission('recruitment.manage'));
+
+      allow delete: if isValidId(vacancyId) && isPrimaryAdmin();
+    }
+
+    match /applications/{applicationId} {
+      allow get: if isValidId(applicationId) && isVerifiedUser() && (
+        resource.data.applicantUid == request.auth.uid
+        || isPrimaryAdmin()
+        || hasDelegatedPermission('recruitment.manage')
+        || ((isActiveUserWithRole('manager') || isActiveUserWithRole('coach')) && isTeamMemberWithRole(resource.data.teamId, ['manager', 'coach']))
+      );
+
+      allow list: if isVerifiedUser() && (
+        resource.data.applicantUid == request.auth.uid
+        || isPrimaryAdmin()
+        || hasDelegatedPermission('recruitment.manage')
+        || ((isActiveUserWithRole('manager') || isActiveUserWithRole('coach')) && isTeamMemberWithRole(resource.data.teamId, ['manager', 'coach']))
+      );
+
+      allow create: if isValidId(applicationId)
+        && isVerifiedUser()
+        && isValidApplication(incoming())
+        && applicationId == incoming().vacancyId + '_' + request.auth.uid
+        && incoming().applicantUid == request.auth.uid
+        && incoming().stage == 'recebida'
+        && !('internalNotes' in incoming())
+        && exists(/databases/$(database)/documents/vacancies/$(incoming().vacancyId))
+        && get(/databases/$(database)/documents/vacancies/$(incoming().vacancyId)).data.status == 'open'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(applicationId)
+        && isVerifiedUser()
+        && isValidApplication(incoming())
+        && incoming().vacancyId == existing().vacancyId
+        && incoming().teamId == existing().teamId
+        && incoming().applicantUid == existing().applicantUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && existing().stage != 'aprovada'
+        && existing().stage != 'rejeitada'
+        && (
+          isPrimaryAdmin()
+          || hasDelegatedPermission('recruitment.manage')
+          || (
+            (isActiveUserWithRole('manager') || isActiveUserWithRole('coach'))
+            && isTeamMemberWithRole(existing().teamId, ['manager', 'coach'])
+            && incoming().diff(existing()).affectedKeys().hasOnly(['stage', 'internalNotes', 'updatedAt'])
+          )
+        );
+
+      allow delete: if isValidId(applicationId) && isPrimaryAdmin();
+    }
+
+    // =========================================================================
+    // 7. tournaments & matches (Competitivo privado isolado de candidatos)
+    // =========================================================================
+    match /tournaments/{tournamentId} {
+      allow get: if isValidId(tournamentId) && (resource.data.isPublic == true || isOfficialMember());
+      allow list: if resource.data.isPublic == true || isOfficialMember();
+
+      allow create: if isValidId(tournamentId)
+        && isVerifiedUser()
+        && isValidTournament(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (isPrimaryAdmin() || hasDelegatedPermission('competitive.manage') || isActiveUserWithRole('manager'));
+
+      allow update: if isValidId(tournamentId)
+        && isVerifiedUser()
+        && isValidTournament(incoming())
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (isPrimaryAdmin() || hasDelegatedPermission('competitive.manage') || isActiveUserWithRole('manager'));
+
+      allow delete: if isValidId(tournamentId) && isPrimaryAdmin();
+    }
+
+    match /matches/{matchId} {
+      allow get: if isValidId(matchId) && (resource.data.isPublic == true || isOfficialMember());
+      allow list: if resource.data.isPublic == true || isOfficialMember();
+
+      allow create: if isValidId(matchId)
+        && isVerifiedUser()
+        && isValidMatch(incoming())
+        && incoming().enteredBy == request.auth.uid
+        && exists(/databases/$(database)/documents/teams/$(incoming().teamId))
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (canManageTeam(incoming().teamId) || hasDelegatedPermission('competitive.manage'));
+
+      allow update: if isValidId(matchId)
+        && isVerifiedUser()
+        && isValidMatch(incoming())
+        && incoming().teamId == existing().teamId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isPrimaryAdmin()
+          || (existing().status != 'completed' && (canManageTeam(existing().teamId) || hasDelegatedPermission('competitive.manage')))
+        );
+
+      allow delete: if isValidId(matchId) && isPrimaryAdmin();
+    }
+
+    // =========================================================================
+    // 8. trainings & attendance (Treinamentos restritos por equipe)
+    // =========================================================================
+    match /trainings/{trainingId} {
+      allow get: if isValidId(trainingId) && isVerifiedUser() && (
+        isAnyAdmin()
+        || isTeamMemberWithRole(resource.data.teamId, ['manager', 'coach', 'starter', 'reserve', 'analyst'])
+      );
+
+      allow list: if isVerifiedUser() && (
+        isAnyAdmin()
+        || isTeamMemberWithRole(resource.data.teamId, ['manager', 'coach', 'starter', 'reserve', 'analyst'])
+      );
+
+      allow create: if isValidId(trainingId)
+        && isVerifiedUser()
+        && isValidTraining(incoming())
+        && incoming().createdBy == request.auth.uid
+        && exists(/databases/$(database)/documents/teams/$(incoming().teamId))
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && canManageTeam(incoming().teamId);
+
+      allow update: if isValidId(trainingId)
+        && isVerifiedUser()
+        && isValidTraining(incoming())
+        && incoming().teamId == existing().teamId
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (isPrimaryAdmin() || (existing().status != 'completed' && canManageTeam(existing().teamId)));
+
+      allow delete: if isValidId(trainingId) && isPrimaryAdmin();
+    }
+
+    match /attendance/{attendanceId} {
+      allow get: if isValidId(attendanceId) && isVerifiedUser() && (
+        resource.data.uid == request.auth.uid
+        || isAnyAdmin()
+        || isTeamMemberWithRole(resource.data.teamId, ['manager', 'coach'])
+      );
+
+      allow list: if isVerifiedUser() && (
+        resource.data.uid == request.auth.uid
+        || isAnyAdmin()
+        || isTeamMemberWithRole(resource.data.teamId, ['manager', 'coach'])
+      );
+
+      allow create: if isValidId(attendanceId)
+        && isVerifiedUser()
+        && isValidAttendance(incoming())
+        && attendanceId == incoming().trainingId + '_' + incoming().uid
+        && exists(/databases/$(database)/documents/trainings/$(incoming().trainingId))
+        && incoming().updatedAt == request.time
+        && (
+          (
+            incoming().uid == request.auth.uid
+            && incoming().coachVerifiedStatus == 'unmarked'
+            && isTeamMemberWithRole(incoming().teamId, ['starter', 'reserve', 'coach', 'manager'])
+          )
+          || canManageTeam(incoming().teamId)
+        );
+
+      allow update: if isValidId(attendanceId)
+        && isVerifiedUser()
+        && isValidAttendance(incoming())
+        && incoming().trainingId == existing().trainingId
+        && incoming().teamId == existing().teamId
+        && incoming().uid == existing().uid
+        && incoming().updatedAt == request.time
+        && (
+          canManageTeam(existing().teamId)
+          || (
+            existing().uid == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['playerStatus', 'justification', 'updatedAt'])
+          )
+        );
+
+      allow delete: if isValidId(attendanceId) && isPrimaryAdmin();
+    }
+
+    // =========================================================================
+    // 9. notifications & notificationPreferences (Criação exclusiva via Backend Render)
+    // =========================================================================
+    match /notifications/{notificationId} {
+      allow get: if isValidId(notificationId) && isSignedIn() && (
+        resource.data.recipientUid == request.auth.uid || isAnyAdmin()
+      );
+
+      allow list: if isSignedIn() && (
+        resource.data.recipientUid == request.auth.uid || isAnyAdmin()
+      );
+
+      allow create: if false;
+
+      allow update: if isValidId(notificationId)
+        && isSignedIn()
+        && isValidNotification(incoming())
+        && incoming().recipientUid == existing().recipientUid
+        && incoming().createdAt == existing().createdAt
+        && (
+          isPrimaryAdmin()
+          || (
+            resource.data.recipientUid == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['read'])
+          )
+        );
+
+      allow delete: if isValidId(notificationId) && (
+        isPrimaryAdmin() || (isSignedIn() && resource.data.recipientUid == request.auth.uid)
+      );
+    }
+
+    match /notificationPreferences/{userId} {
+      allow get: if isValidId(userId) && isSignedIn() && (request.auth.uid == userId || isPrimaryAdmin());
+      allow list: if isSignedIn() && resource.data.uid == request.auth.uid;
+
+      allow create: if isValidId(userId)
+        && isSignedIn()
+        && request.auth.uid == userId
+        && isValidNotificationPreference(incoming())
+        && incoming().uid == userId
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(userId)
+        && isSignedIn()
+        && request.auth.uid == userId
+        && isValidNotificationPreference(incoming())
+        && incoming().uid == existing().uid
+        && incoming().updatedAt == request.time;
+
+      allow delete: if isValidId(userId) && isPrimaryAdmin();
+    }
+
+    // =========================================================================
+    // 10. playerStats & playerStatsHistory (System-Only Writes from Render Backend)
+    // =========================================================================
+    match /playerStats/{uid} {
+      allow get: if isValidId(uid);
+      allow list: if true;
+      allow write: if false;
+    }
+
+    match /playerStatsHistory/{snapshotId} {
+      allow get: if isValidId(snapshotId);
+      allow list: if true;
+      allow write: if false;
+    }
+
+    // =========================================================================
+    // 11. achievements, siteContent, news, media, sponsors (CMS / NXF Studio)
+    // =========================================================================
+    match /achievements/{achievementId} {
+      allow get: if isValidId(achievementId) && (resource.data.isPublic == true || isOfficialMember());
+      allow list: if resource.data.isPublic == true || isOfficialMember();
+
+      allow create: if isValidId(achievementId)
+        && isVerifiedUser()
+        && isValidAchievement(incoming())
+        && incoming().createdBy == request.auth.uid
+        && incoming().achievedAt is timestamp
+        && (isPrimaryAdmin() || hasDelegatedPermission('cms.manage') || hasDelegatedPermission('competitive.manage'));
+
+      allow update: if isValidId(achievementId)
+        && isVerifiedUser()
+        && isValidAchievement(incoming())
+        && incoming().createdBy == existing().createdBy
+        && (isPrimaryAdmin() || hasDelegatedPermission('cms.manage') || hasDelegatedPermission('competitive.manage'));
+
+      allow delete: if isValidId(achievementId) && isPrimaryAdmin();
+    }
+
+    match /siteContent/{contentId} {
+      allow get: if isValidId(contentId);
+      allow list: if true;
+
+      allow create: if isValidId(contentId)
+        && isVerifiedUser()
+        && isValidSiteContent(incoming())
+        && incoming().updatedBy == request.auth.uid
+        && incoming().updatedAt == request.time
+        && (isPrimaryAdmin() || hasDelegatedPermission('cms.manage'));
+
+      allow update: if isValidId(contentId)
+        && isVerifiedUser()
+        && isValidSiteContent(incoming())
+        && incoming().updatedBy == request.auth.uid
+        && incoming().updatedAt == request.time
+        && (isPrimaryAdmin() || hasDelegatedPermission('cms.manage'));
+
+      allow delete: if isValidId(contentId) && isPrimaryAdmin();
+    }
+
+    match /news/{articleId} {
+      allow get: if isValidId(articleId) && (
+        resource.data.status == 'published' || isAnyAdmin() || hasDelegatedPermission('cms.manage')
+      );
+
+      allow list: if resource.data.status == 'published' || isAnyAdmin() || hasDelegatedPermission('cms.manage');
+
+      allow create: if isValidId(articleId)
+        && isVerifiedUser()
+        && isValidNews(incoming())
+        && incoming().authorUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (isPrimaryAdmin() || hasDelegatedPermission('cms.manage'));
+
+      allow update: if isValidId(articleId)
+        && isVerifiedUser()
+        && isValidNews(incoming())
+        && incoming().authorUid == existing().authorUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (isPrimaryAdmin() || hasDelegatedPermission('cms.manage'));
+
+      allow delete: if isValidId(articleId) && isPrimaryAdmin();
+    }
+
+    match /media/{mediaId} {
+      allow get: if isValidId(mediaId) && (isAnyAdmin() || hasDelegatedPermission('cms.manage') || isOfficialMember());
+      allow list: if isAnyAdmin() || hasDelegatedPermission('cms.manage') || isOfficialMember();
+
+      allow create: if isValidId(mediaId)
+        && isVerifiedUser()
+        && isValidMedia(incoming())
+        && incoming().uploadedBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && (isPrimaryAdmin() || hasDelegatedPermission('cms.manage'));
+
+      allow delete: if isValidId(mediaId) && (isPrimaryAdmin() || hasDelegatedPermission('cms.manage'));
+    }
+
+    match /sponsors/{sponsorId} {
+      allow get: if isValidId(sponsorId) && (resource.data.active == true || isAnyAdmin() || hasDelegatedPermission('cms.manage'));
+      allow list: if resource.data.active == true || isAnyAdmin() || hasDelegatedPermission('cms.manage');
+
+      allow create: if isValidId(sponsorId)
+        && isVerifiedUser()
+        && isValidSponsor(incoming())
+        && incoming().createdAt == request.time
+        && (isPrimaryAdmin() || hasDelegatedPermission('cms.manage'));
+
+      allow update: if isValidId(sponsorId)
+        && isVerifiedUser()
+        && isValidSponsor(incoming())
+        && incoming().createdAt == existing().createdAt
+        && (isPrimaryAdmin() || hasDelegatedPermission('cms.manage'));
+
+      allow delete: if isValidId(sponsorId) && isPrimaryAdmin();
+    }
+
+    // =========================================================================
+    // 12. auditLogs, activityFeed, supportTickets, systemSettings, backupJobs
+    // =========================================================================
+    match /auditLogs/{logId} {
+      allow get: if isValidId(logId) && (
+        isPrimaryAdmin() || hasDelegatedPermission('system.manage') || hasDelegatedPermission('users.read')
+      );
+      allow list: if isPrimaryAdmin() || hasDelegatedPermission('system.manage') || hasDelegatedPermission('users.read');
+
+      // Auditoria escrita exclusivamente pelo servidor Backend Admin SDK
+      allow create, update, delete: if false;
+    }
+
+    match /activityFeed/{activityId} {
+      allow get: if isValidId(activityId) && isOfficialMember();
+      allow list: if isOfficialMember() && (
+        resource.data.scope == 'org'
+        || resource.data.actorUid == request.auth.uid
+        || isAnyAdmin()
+      );
+
+      allow create: if isValidId(activityId)
+        && isVerifiedUser()
+        && isValidActivityItem(incoming())
+        && incoming().actorUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && (isAnyAdmin() || isActiveUserWithRole('manager') || isActiveUserWithRole('coach'));
+
+      allow update, delete: if false;
+    }
+
+    match /supportTickets/{ticketId} {
+      allow get: if isValidId(ticketId) && isOfficialMember() && (
+        resource.data.requesterUid == request.auth.uid || isAnyAdmin()
+      );
+
+      allow list: if isOfficialMember() && (
+        resource.data.requesterUid == request.auth.uid || isAnyAdmin()
+      );
+
+      allow create: if isValidId(ticketId)
+        && isOfficialMember()
+        && isValidSupportTicket(incoming())
+        && incoming().requesterUid == request.auth.uid
+        && incoming().status == 'aberto'
+        && !('adminResolution' in incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(ticketId)
+        && isOfficialMember()
+        && isValidSupportTicket(incoming())
+        && incoming().requesterUid == existing().requesterUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (isPrimaryAdmin() || hasDelegatedPermission('system.manage'));
+
+      allow delete: if isValidId(ticketId) && isPrimaryAdmin();
+    }
+
+    match /systemSettings/{settingId} {
+      allow get: if isValidId(settingId) && isOfficialMember();
+      allow list: if isOfficialMember();
+      allow create, update, delete: if false;
+    }
+
+    match /backupJobs/{jobId} {
+      allow get: if isValidId(jobId) && isPrimaryAdmin();
+      allow list: if isPrimaryAdmin();
+      allow create, update, delete: if false;
+    }
+  }
+}

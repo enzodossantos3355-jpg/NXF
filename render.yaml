@@ -1,0 +1,76 @@
+services:
+  # 1. Frontend React SPA / PWA (Render Static Site)
+  - type: web
+    name: nxf-esports
+    runtime: static
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    pullRequestPreviewsEnabled: true
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: SAMEORIGIN
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+      - path: /sw.js
+        name: Cache-Control
+        value: no-cache, no-store, must-revalidate
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_BASE_URL
+        sync: false
+      - key: VITE_FIREBASE_API_KEY
+        sync: false
+      - key: VITE_FIREBASE_AUTH_DOMAIN
+        sync: false
+      - key: VITE_FIREBASE_PROJECT_ID
+        sync: false
+      - key: VITE_FIREBASE_STORAGE_BUCKET
+        sync: false
+      - key: VITE_FIREBASE_MESSAGING_SENDER_ID
+        sync: false
+      - key: VITE_FIREBASE_APP_ID
+        sync: false
+      - key: VITE_FIREBASE_FIRESTORE_DATABASE_ID
+        value: ai-studio-c6bc6e90-4161-44a5-aa11-a73b7007e787
+      - key: VITE_APP_URL
+        sync: false
+      - key: VITE_FIREBASE_VAPID_KEY
+        sync: false
+
+  # 2. Backend Node.js + Express (Render Starter — substitui Cloud Functions/Blaze)
+  - type: web
+    name: nxf-esports-api
+    runtime: node
+    plan: starter
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_FIRESTORE_DATABASE_ID
+        value: ai-studio-c6bc6e90-4161-44a5-aa11-a73b7007e787
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: FIREBASE_WEB_API_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: PUBLIC_API_URL
+        sync: false
+      - key: BOOTSTRAP_ADMIN_SECRET
+        sync: false
+      - key: BRAWL_STARS_API_TOKEN
+        sync: false
+      - key: BRAWL_STARS_API_BASE_URL
+        value: https://api.brawlstars.com/v1
