@@ -1,5 +1,3 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import {
   applicationDefault,
   cert,
@@ -11,31 +9,16 @@ import {
 import { getAuth, type Auth } from 'firebase-admin/auth';
 import { getFirestore, type Firestore } from 'firebase-admin/firestore';
 
-interface AppletConfigFile {
-  apiKey?: string;
-  projectId?: string;
-  firestoreDatabaseId?: string;
-}
-
-function loadAppletConfig(): AppletConfigFile {
-  try {
-    const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
-    if (fs.existsSync(configPath)) {
-      return JSON.parse(fs.readFileSync(configPath, 'utf8')) as AppletConfigFile;
-    }
-  } catch {
-    // ignore invalid optional config file
-  }
-  return {};
-}
-
-const appletConfig = loadAppletConfig();
+type RawServiceAccount = ServiceAccount & {
+  project_id?: string;
+  client_email?: string;
+  private_key?: string;
+};
 
 export function getFirebaseWebApiKey(): string {
   return (
     process.env.FIREBASE_WEB_API_KEY?.trim() ||
     process.env.VITE_FIREBASE_API_KEY?.trim() ||
-    appletConfig.apiKey ||
     ''
   );
 }
@@ -46,14 +29,14 @@ let cachedDb: Firestore | null = null;
 let initAttempted = false;
 let initError: string | null = null;
 
-function parseServiceAccountFromEnv(): ServiceAccount | null {
+function parseServiceAccountFromEnv(): RawServiceAccount | null {
   const rawJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim();
   if (rawJson) {
     try {
       const jsonText = rawJson.startsWith('{')
         ? rawJson
         : Buffer.from(rawJson, 'base64').toString('utf8');
-      return JSON.parse(jsonText) as ServiceAccount;
+      return JSON.parse(jsonText) as RawServiceAccount;
     } catch (err) {
       throw new Error(
         `FIREBASE_SERVICE_ACCOUNT_JSON inválido: ${err instanceof Error ? err.message : String(err)}`
@@ -65,8 +48,7 @@ function parseServiceAccountFromEnv(): ServiceAccount | null {
   const privateKey = process.env.FIREBASE_PRIVATE_KEY?.trim();
   const projectId =
     process.env.FIREBASE_PROJECT_ID?.trim() ||
-    process.env.GOOGLE_CLOUD_PROJECT?.trim() ||
-    appletConfig.projectId;
+    process.env.GOOGLE_CLOUD_PROJECT?.trim();
 
   if (clientEmail && privateKey && projectId) {
     return {
@@ -80,20 +62,14 @@ function parseServiceAccountFromEnv(): ServiceAccount | null {
 }
 
 export function getFirestoreDatabaseId(): string {
-  return (
-    process.env.FIREBASE_FIRESTORE_DATABASE_ID?.trim() ||
-    appletConfig.firestoreDatabaseId ||
-    '(default)'
-  );
+  return process.env.FIREBASE_FIRESTORE_DATABASE_ID?.trim() || '(default)';
 }
 
 export function hasExplicitAdminCredentials(): boolean {
   return Boolean(
     process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim() ||
       (process.env.FIREBASE_CLIENT_EMAIL?.trim() && process.env.FIREBASE_PRIVATE_KEY?.trim()) ||
-      process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim() ||
-      process.env.K_SERVICE ||
-      process.env.CLOUD_RUN_JOB
+      process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim()
   );
 }
 
@@ -106,10 +82,10 @@ export function getAdminServices(): {
   projectId: string | undefined;
   databaseId: string;
 } {
-  const projectId =
+  let resolvedProjectId =
     process.env.FIREBASE_PROJECT_ID?.trim() ||
     process.env.GOOGLE_CLOUD_PROJECT?.trim() ||
-    appletConfig.projectId;
+    undefined;
   const databaseId = getFirestoreDatabaseId();
 
   if (!initAttempted) {
@@ -120,18 +96,20 @@ export function getAdminServices(): {
       } else {
         const serviceAccount = parseServiceAccountFromEnv();
         if (serviceAccount) {
+          resolvedProjectId =
+            serviceAccount.project_id || serviceAccount.projectId || resolvedProjectId;
           cachedApp = initializeApp({
             credential: cert(serviceAccount),
-            projectId: serviceAccount.projectId || projectId,
+            ...(resolvedProjectId ? { projectId: resolvedProjectId } : {}),
           });
         } else if (hasExplicitAdminCredentials()) {
           cachedApp = initializeApp({
             credential: applicationDefault(),
-            projectId,
+            ...(resolvedProjectId ? { projectId: resolvedProjectId } : {}),
           });
         } else {
           throw new Error(
-            'Credenciais do Firebase Admin SDK não configuradas neste ambiente.'
+            'Credenciais do Firebase Admin SDK não configuradas neste ambiente. Defina FIREBASE_SERVICE_ACCOUNT_JSON.'
           );
         }
       }
@@ -155,7 +133,7 @@ export function getAdminServices(): {
     app: cachedApp,
     auth: cachedAuth,
     db: cachedDb,
-    projectId,
+    projectId: cachedApp?.options?.projectId || resolvedProjectId,
     databaseId,
   };
 }

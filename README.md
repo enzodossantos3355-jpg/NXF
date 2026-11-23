@@ -20,15 +20,18 @@ Plataforma web oficial (Portal Público + Painel Privado Executivo Gamer + PWA) 
 ---
 
 ## 2. Pré-requisitos do Firebase (Plano Spark)
-1. Abrir o projeto no [Firebase Console](https://console.firebase.google.com/).
-2. **Authentication**:
+1. Abrir o projeto dedicado da NXF eSports no [Firebase Console](https://console.firebase.google.com/).
+2. **Aplicativo Web (`</>`)**:
+   - Em *Configurações do projeto → Seus aplicativos*, registrar um aplicativo Web para obter `apiKey`, `authDomain`, `projectId`, `storageBucket`, `messagingSenderId` e `appId`.
+3. **Authentication**:
    - Ativar provedor **E-mail/Senha** (*Authentication → Sign-in method → Email/Password*).
    - Adicionar o domínio do Static Site (ex.: `nxf-esports.onrender.com`) em *Authentication → Settings → Authorized domains*.
-3. **Cloud Firestore**:
-   - Quando autorizado, implantar `firestore.rules` e `firestore.indexes.json` para o banco do projeto (`ai-studio-c6bc6e90-4161-44a5-aa11-a73b7007e787`).
-4. **Firebase Storage (Opcional / Legado)**:
+4. **Cloud Firestore**:
+   - Criar o banco em modo de produção (banco padrão `(default)` no plano Spark).
+   - Quando autorizado, implantar `firestore.rules` e `firestore.indexes.json` no novo projeto.
+5. **Firebase Storage (Opcional / Não necessário no Spark)**:
    - Projetos novos no plano Spark não precisam ativar bucket no Storage: o upload de avatares, banners e mídias do CMS funciona integralmente via backend Express (`/api/uploads/*`).
-   - Se o projeto possuir bucket legado ativo, implante também `storage.rules`.
+   - Se o projeto possuir bucket ativo futuramente, implante também `storage.rules`.
 
 ---
 
@@ -45,7 +48,7 @@ Nenhuma senha administrativa padrão existe no código. Escolha um dos dois cami
 ### Opção B — Via script CLI (`scripts/bootstrap-admin.mjs`)
 ```bash
 export FIREBASE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'
-export FIREBASE_FIRESTORE_DATABASE_ID="ai-studio-c6bc6e90-4161-44a5-aa11-a73b7007e787"
+export FIREBASE_FIRESTORE_DATABASE_ID="(default)"
 node scripts/bootstrap-admin.mjs --code "#NXF001" --name "Nome Completo" --nick "FounderNXF"
 ```
 
@@ -70,9 +73,10 @@ A API oficial da Supercell (`https://api.brawlstars.com/v1`) exige que o IP púb
 - **Health Check**: `/api/health`
 - **Variáveis obrigatórias**:
   - `NODE_ENV=production`
-  - `FIREBASE_PROJECT_ID`
-  - `FIREBASE_FIRESTORE_DATABASE_ID=ai-studio-c6bc6e90-4161-44a5-aa11-a73b7007e787`
-  - `FIREBASE_SERVICE_ACCOUNT_JSON` (JSON ou Base64 da Service Account do Firebase)
+  - `FIREBASE_PROJECT_ID` (ID do projeto no Firebase Console)
+  - `FIREBASE_FIRESTORE_DATABASE_ID=(default)`
+  - `FIREBASE_SERVICE_ACCOUNT_JSON` (JSON ou Base64 da Service Account do novo projeto Firebase)
+  - `FIREBASE_WEB_API_KEY` (Web API Key do aplicativo Web do novo projeto Firebase — usada em `/api/auth/login-profile`)
   - `ALLOWED_ORIGINS` (URL exata do Static Site, ex.: `https://nxf-esports.onrender.com`)
   - `PUBLIC_API_URL` (URL pública desta API, ex.: `https://nxf-esports-api.onrender.com`)
   - `BOOTSTRAP_ADMIN_SECRET` (apenas até concluir o 1º admin)

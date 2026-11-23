@@ -15,21 +15,8 @@
 
 import 'dotenv/config';
 import crypto from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
 import admin from 'firebase-admin';
-
-function loadAppletConfig() {
-  try {
-    const p = path.resolve(process.cwd(), 'firebase-applet-config.json');
-    if (fs.existsSync(p)) {
-      return JSON.parse(fs.readFileSync(p, 'utf8'));
-    }
-  } catch {
-    // ignore optional file errors
-  }
-  return {};
-}
+import { getFirestore } from 'firebase-admin/firestore';
 
 function parseArgs(argv) {
   const args = {};
@@ -61,7 +48,7 @@ function codeToInternalAuthId(raw) {
   return `${norm}@auth.nxf-esports.local`;
 }
 
-function initAdminApp(appletConfig) {
+function initAdminApp() {
   if (admin.apps.length) return admin.apps[0];
 
   const rawJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim();
@@ -70,15 +57,16 @@ function initAdminApp(appletConfig) {
       ? rawJson
       : Buffer.from(rawJson, 'base64').toString('utf8');
     const sa = JSON.parse(jsonText);
+    const projectId = sa.project_id || sa.projectId || process.env.FIREBASE_PROJECT_ID?.trim();
     return admin.initializeApp({
       credential: admin.credential.cert(sa),
-      projectId: sa.project_id || process.env.FIREBASE_PROJECT_ID || appletConfig.projectId,
+      ...(projectId ? { projectId } : {}),
     });
   }
 
   const clientEmail = process.env.FIREBASE_CLIENT_EMAIL?.trim();
   const privateKey = process.env.FIREBASE_PRIVATE_KEY?.trim();
-  const projectId = process.env.FIREBASE_PROJECT_ID?.trim() || appletConfig.projectId;
+  const projectId = process.env.FIREBASE_PROJECT_ID?.trim() || process.env.GOOGLE_CLOUD_PROJECT?.trim();
   if (clientEmail && privateKey && projectId) {
     return admin.initializeApp({
       credential: admin.credential.cert({
@@ -90,23 +78,25 @@ function initAdminApp(appletConfig) {
     });
   }
 
-  return admin.initializeApp({
-    credential: admin.credential.applicationDefault(),
-    projectId,
-  });
+  if (process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim()) {
+    return admin.initializeApp({
+      credential: admin.credential.applicationDefault(),
+      ...(projectId ? { projectId } : {}),
+    });
+  }
+
+  throw new Error(
+    'Credenciais do Firebase Admin SDK ausentes. Defina FIREBASE_SERVICE_ACCOUNT_JSON, GOOGLE_APPLICATION_CREDENTIALS ou FIREBASE_PROJECT_ID + FIREBASE_CLIENT_EMAIL + FIREBASE_PRIVATE_KEY.'
+  );
 }
 
 async function main() {
-  const appletConfig = loadAppletConfig();
   const args = parseArgs(process.argv);
   const rawCode = args.code;
   const uidArg = args.uid;
   const fullName = (args.name || 'Administrador NXF').trim().slice(0, 80);
   const nickname = (args.nick || args.nickname || 'AdminNXF').trim().slice(0, 32);
-  const databaseId =
-    process.env.FIREBASE_FIRESTORE_DATABASE_ID?.trim() ||
-    appletConfig.firestoreDatabaseId ||
-    '(default)';
+  const databaseId = process.env.FIREBASE_FIRESTORE_DATABASE_ID?.trim() || '(default)';
 
   if (!rawCode && !uidArg) {
     console.error('Erro: informe --code "#SEUCODE" (ou --uid <uid>).');
@@ -122,18 +112,12 @@ async function main() {
   const formattedCode = formatPlayerCode(normalizedCode);
   const internalAuthId = codeToInternalAuthId(normalizedCode);
 
-  const app = initAdminApp(appletConfig);
+  const app = initAdminApp();
   const auth = admin.auth(app);
   const db =
     databaseId && databaseId !== '(default)'
-      ? admin.firestore(app).databaseId
-        ? admin.firestore(app)
-        : admin.firestore(app)
-      : admin.firestore(app);
-
-  if (databaseId && databaseId !== '(default)') {
-    db.settings({ databaseId });
-  }
+      ? getFirestore(app, databaseId)
+      : getFirestore(app);
 
   let userRecord;
   if (uidArg) {

@@ -6,6 +6,7 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { SiteProvider } from './context/SiteContext';
 import { PrivateLayout } from './layouts/PrivateLayout';
 import { PublicLayout } from './layouts/PublicLayout';
+import { isFirebaseConfigured, missingFirebaseEnvVars } from './lib/firebase';
 
 import { AboutPage } from './pages/public/AboutPage';
 import { CandidatePortalPage } from './pages/public/CandidatePortalPage';
@@ -28,6 +29,32 @@ import { RecruitmentAdminPage } from './pages/private/RecruitmentAdminPage';
 import { StudioCmsPage } from './pages/private/StudioCmsPage';
 import { SystemAdminPage } from './pages/private/SystemAdminPage';
 import { TrainingsPage } from './pages/private/TrainingsPage';
+
+function FirebaseConfigMissingShell() {
+  return (
+    <div className="min-h-screen bg-[#0D0D10] text-white flex items-center justify-center p-6">
+      <div className="max-w-lg w-full bg-[#141419] border border-white/10 rounded-xl p-6 space-y-4">
+        <p className="text-xs font-semibold uppercase tracking-wider text-[#EF3340]">
+          NXF eSports — Configuração Pendente
+        </p>
+        <h1 className="font-display text-2xl font-bold text-white">
+          Firebase não configurado neste ambiente
+        </h1>
+        <p className="text-sm text-[#A1A1AA] leading-relaxed">
+          Defina as variáveis de ambiente públicas do novo projeto Firebase no Render (Static Site) ou no arquivo <code className="text-white">.env</code> local e realize um novo build.
+        </p>
+        <div className="bg-[#0D0D10] border border-white/8 rounded-lg p-3 space-y-1">
+          <p className="text-xs font-semibold text-[#D4D4D8]">Variáveis ausentes:</p>
+          <ul className="text-xs font-mono text-[#EF3340] space-y-0.5">
+            {missingFirebaseEnvVars.map((envName) => (
+              <li key={envName}>{envName}</li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function AuthLoadingShell() {
   return (
@@ -79,6 +106,10 @@ function SystemRoute({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
+  if (!isFirebaseConfigured) {
+    return <FirebaseConfigMissingShell />;
+  }
+
   return (
     <ErrorBoundary>
       <AuthProvider>

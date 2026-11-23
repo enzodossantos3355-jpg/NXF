@@ -4,17 +4,9 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     // =========================================================================
-    // Global Safety Net & Explicitly Blocked Legacy Collections
+    // Global Safety Net & Server-Only Internal Collections (NXF eSports)
     // =========================================================================
     match /{document=**} {
-      allow read, write: if false;
-    }
-
-    match /app_settings/{document} {
-      allow read, write: if false;
-    }
-
-    match /sent_offers/{document} {
       allow read, write: if false;
     }
 
@@ -484,7 +476,11 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'displayName', 'brawlTag', 'brawlTagStatus', 'hasLocalPassword', 'updatedAt'])
-        && (!('brawlTagStatus' in incoming()) || incoming().brawlTagStatus in ['none', 'pending']);
+        && (
+          !('brawlTagStatus' in incoming())
+          || incoming().brawlTagStatus in ['none', 'pending']
+          || ('brawlTagStatus' in existing() && incoming().brawlTagStatus == existing().brawlTagStatus)
+        );
 
       allow delete: if false;
     }

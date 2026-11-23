@@ -32,6 +32,11 @@ import {
   authenticateProfileByPassword,
   clearProfileAuthRateLimits,
 } from './profileAuthService.ts';
+import {
+  getFirebaseWebApiKey,
+  getFirestoreDatabaseId,
+  hasExplicitAdminCredentials,
+} from './firebaseAdmin.ts';
 import { normalizePublicBaseUrl } from './routes.ts';
 
 type PlainRecord = Record<string, unknown>;
@@ -774,4 +779,48 @@ test('Login por card de perfil autentica apenas com senha sem expor Code interno
   );
   assert.equal(blockedRes.ok, false);
   assert.equal(blockedRes.status, 429);
+});
+
+test('Firebase Admin config usa exclusivamente variáveis de ambiente e banco padrão (default)', () => {
+  const prevDbId = process.env.FIREBASE_FIRESTORE_DATABASE_ID;
+  const prevWebKey = process.env.FIREBASE_WEB_API_KEY;
+  const prevViteKey = process.env.VITE_FIREBASE_API_KEY;
+  const prevSa = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  const prevEmail = process.env.FIREBASE_CLIENT_EMAIL;
+  const prevPriv = process.env.FIREBASE_PRIVATE_KEY;
+  const prevGac = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+
+  try {
+    delete process.env.FIREBASE_FIRESTORE_DATABASE_ID;
+    delete process.env.FIREBASE_WEB_API_KEY;
+    delete process.env.VITE_FIREBASE_API_KEY;
+    delete process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+    delete process.env.FIREBASE_CLIENT_EMAIL;
+    delete process.env.FIREBASE_PRIVATE_KEY;
+    delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+
+    assert.equal(getFirestoreDatabaseId(), '(default)');
+    assert.equal(getFirebaseWebApiKey(), '');
+    assert.equal(hasExplicitAdminCredentials(), false);
+
+    process.env.FIREBASE_FIRESTORE_DATABASE_ID = 'custom-db';
+    process.env.FIREBASE_WEB_API_KEY = 'web-api-key-env';
+    assert.equal(getFirestoreDatabaseId(), 'custom-db');
+    assert.equal(getFirebaseWebApiKey(), 'web-api-key-env');
+  } finally {
+    if (prevDbId === undefined) delete process.env.FIREBASE_FIRESTORE_DATABASE_ID;
+    else process.env.FIREBASE_FIRESTORE_DATABASE_ID = prevDbId;
+    if (prevWebKey === undefined) delete process.env.FIREBASE_WEB_API_KEY;
+    else process.env.FIREBASE_WEB_API_KEY = prevWebKey;
+    if (prevViteKey === undefined) delete process.env.VITE_FIREBASE_API_KEY;
+    else process.env.VITE_FIREBASE_API_KEY = prevViteKey;
+    if (prevSa === undefined) delete process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+    else process.env.FIREBASE_SERVICE_ACCOUNT_JSON = prevSa;
+    if (prevEmail === undefined) delete process.env.FIREBASE_CLIENT_EMAIL;
+    else process.env.FIREBASE_CLIENT_EMAIL = prevEmail;
+    if (prevPriv === undefined) delete process.env.FIREBASE_PRIVATE_KEY;
+    else process.env.FIREBASE_PRIVATE_KEY = prevPriv;
+    if (prevGac === undefined) delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    else process.env.GOOGLE_APPLICATION_CREDENTIALS = prevGac;
+  }
 });

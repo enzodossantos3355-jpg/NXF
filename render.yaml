@@ -39,7 +39,7 @@ services:
       - key: VITE_FIREBASE_APP_ID
         sync: false
       - key: VITE_FIREBASE_FIRESTORE_DATABASE_ID
-        value: ai-studio-c6bc6e90-4161-44a5-aa11-a73b7007e787
+        value: (default)
       - key: VITE_APP_URL
         sync: false
       - key: VITE_FIREBASE_VAPID_KEY
@@ -59,7 +59,7 @@ services:
       - key: FIREBASE_PROJECT_ID
         sync: false
       - key: FIREBASE_FIRESTORE_DATABASE_ID
-        value: ai-studio-c6bc6e90-4161-44a5-aa11-a73b7007e787
+        value: (default)
       - key: FIREBASE_SERVICE_ACCOUNT_JSON
         sync: false
       - key: FIREBASE_WEB_API_KEY
