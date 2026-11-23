@@ -96,7 +96,12 @@ export function SystemAdminPage() {
     if (!firebaseUser) return;
     const unsubs: Array<() => void> = [];
 
-    if (capabilities.isPrimaryAdmin || capabilities.canAccessSystem) {
+    const canReadUsers =
+      capabilities.isPrimaryAdmin ||
+      capabilities.permissions.includes('users.read') ||
+      capabilities.permissions.includes('users.manage');
+
+    if (canReadUsers) {
       unsubs.push(
         onSnapshot(
           query(collection(db, 'users'), limit(50)),
@@ -104,6 +109,9 @@ export function SystemAdminPage() {
           () => {}
         )
       );
+    }
+
+    if (capabilities.isPrimaryAdmin || capabilities.canAccessSystem) {
       unsubs.push(
         onSnapshot(
           query(collection(db, 'auditLogs'), orderBy('createdAt', 'desc'), limit(30)),
@@ -715,7 +723,9 @@ export function SystemAdminPage() {
                     <span className="text-[#EF3340]">{t.status}</span>
                   </div>
                   <p className="text-xs text-[#A1A1AA]">{t.description}</p>
-                  {capabilities.isAnyAdmin && t.status !== 'resolvido' && (
+                  {(capabilities.isPrimaryAdmin ||
+                    capabilities.permissions.includes('system.manage')) &&
+                    t.status !== 'resolvido' && (
                     <button
                       type="button"
                       onClick={() =>

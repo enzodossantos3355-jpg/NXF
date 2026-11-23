@@ -103,6 +103,14 @@ service cloud.firestore {
         );
     }
 
+    function hasUserTeam(teamId) {
+      return hasUserDoc()
+        && currentUserDoc().status == 'active'
+        && currentUserDoc().teamIds is list
+        && currentUserDoc().teamIds.size() <= 20
+        && teamId in currentUserDoc().teamIds;
+    }
+
     function isTeamMemberWithRole(teamId, allowedRoles) {
       return isVerifiedUser()
         && isValidId(teamId)
@@ -126,6 +134,16 @@ service cloud.firestore {
       return val is string && val.size() >= minLen && val.size() <= maxLen;
     }
 
+    function isValidSocialLinks(links) {
+      return links is map
+        && links.keys().hasOnly(['twitter', 'instagram', 'youtube', 'twitch', 'discord'])
+        && isOptionalString(links, 'twitter', 300)
+        && isOptionalString(links, 'instagram', 300)
+        && isOptionalString(links, 'youtube', 300)
+        && isOptionalString(links, 'twitch', 300)
+        && isOptionalString(links, 'discord', 300);
+    }
+
     // =========================================================================
     // Entity Validation Blueprints (Anti-Update-Gap)
     // =========================================================================
@@ -144,9 +162,9 @@ service cloud.firestore {
         && data.roles is list && data.roles.size() >= 1 && data.roles.size() <= 6
         && data.roles.hasOnly(['primary_admin', 'delegated_admin', 'manager', 'coach', 'player', 'candidate'])
         && data.status in ['active', 'suspended', 'pending_verification']
-        && (!('delegatedPermissions' in data) || (data.delegatedPermissions is list && data.delegatedPermissions.size() <= 30))
-        && (!('teamIds' in data) || (data.teamIds is list && data.teamIds.size() <= 20))
-        && (!('authProviders' in data) || (data.authProviders is list && data.authProviders.size() <= 5))
+        && (!('delegatedPermissions' in data) || (data.delegatedPermissions is list && data.delegatedPermissions.size() <= 30 && (data.delegatedPermissions.size() == 0 || data.delegatedPermissions[0] is string)))
+        && (!('teamIds' in data) || (data.teamIds is list && data.teamIds.size() <= 20 && (data.teamIds.size() == 0 || data.teamIds[0] is string)))
+        && (!('authProviders' in data) || (data.authProviders is list && data.authProviders.size() <= 5 && data.authProviders.hasOnly(['code_password', 'email_password'])))
         && (!('hasLocalPassword' in data) || data.hasLocalPassword is bool)
         && (!('brawlTagStatus' in data) || data.brawlTagStatus in ['none', 'pending', 'approved', 'rejected'])
         && isOptionalString(data, 'brawlTag', 20)
@@ -172,10 +190,10 @@ service cloud.firestore {
         && isOptionalString(data, 'bannerUrl', 1000)
         && isOptionalString(data, 'bio', 500)
         && data.layout in ['classic', 'competitive', 'minimal']
-        && (!('teamIds' in data) || (data.teamIds is list && data.teamIds.size() <= 20))
+        && (!('teamIds' in data) || (data.teamIds is list && data.teamIds.size() <= 20 && (data.teamIds.size() == 0 || data.teamIds[0] is string)))
         && isOptionalString(data, 'brawlTag', 20)
         && (!('brawlTagApproved' in data) || data.brawlTagApproved is bool)
-        && (!('socialLinks' in data) || (data.socialLinks is map && data.socialLinks.keys().size() <= 8))
+        && (!('socialLinks' in data) || isValidSocialLinks(data.socialLinks))
         && data.isActiveMember is bool
         && data.showInEntrySelector is bool
         && data.moderationStatus in ['approved', 'pending', 'hidden']
@@ -198,18 +216,6 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
-    function isValidTeamMembership(data) {
-      return data.keys().hasAll(['teamId', 'uid', 'nickname', 'roleInTeam', 'status', 'joinedAt'])
-        && data.keys().hasOnly(['teamId', 'uid', 'nickname', 'roleInTeam', 'status', 'joinedAt', 'endedAt'])
-        && isValidId(data.teamId)
-        && isValidId(data.uid)
-        && isNonEmptyString(data.nickname, 2, 32)
-        && data.roleInTeam in ['manager', 'coach', 'starter', 'reserve', 'analyst']
-        && data.status in ['active', 'inactive', 'transferred']
-        && data.joinedAt is timestamp
-        && (!('endedAt' in data) || data.endedAt is timestamp);
-    }
-
     function isValidVacancy(data) {
       return data.keys().hasAll(['teamId', 'teamName', 'title', 'roleTarget', 'status', 'createdBy', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly(['teamId', 'teamName', 'title', 'roleTarget', 'requirements', 'customFields', 'deadline', 'status', 'createdBy', 'createdAt', 'updatedAt'])
@@ -228,7 +234,7 @@ service cloud.firestore {
 
     function isValidApplication(data) {
       return data.keys().hasAll(['vacancyId', 'teamId', 'applicantUid', 'applicantName', 'stage', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['vacancyId', 'teamId', 'applicantUid', 'applicantName', 'brawlTag', 'answers', 'stage', 'internalNotes', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['vacancyId', 'teamId', 'applicantUid', 'applicantName', 'brawlTag', 'answers', 'stage', 'createdAt', 'updatedAt'])
         && isValidId(data.vacancyId)
         && isValidId(data.teamId)
         && isValidId(data.applicantUid)
@@ -236,8 +242,17 @@ service cloud.firestore {
         && isOptionalString(data, 'brawlTag', 20)
         && (!('answers' in data) || (data.answers is map && data.answers.keys().size() <= 15))
         && data.stage in ['recebida', 'em_analise', 'em_teste', 'aprovada', 'rejeitada']
-        && isOptionalString(data, 'internalNotes', 2000)
         && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidApplicationNote(data) {
+      return data.keys().hasAll(['applicationId', 'teamId', 'notes', 'updatedBy', 'updatedAt'])
+        && data.keys().hasOnly(['applicationId', 'teamId', 'notes', 'updatedBy', 'updatedAt'])
+        && isValidId(data.applicationId)
+        && isValidId(data.teamId)
+        && data.notes is string && data.notes.size() <= 2000
+        && isValidId(data.updatedBy)
         && data.updatedAt is timestamp;
     }
 
@@ -327,7 +342,7 @@ service cloud.firestore {
         && data.keys().hasOnly(['uid', 'pushEnabled', 'fcmTokens', 'categories', 'updatedAt'])
         && isValidId(data.uid)
         && data.pushEnabled is bool
-        && (!('fcmTokens' in data) || (data.fcmTokens is list && data.fcmTokens.size() <= 10))
+        && (!('fcmTokens' in data) || (data.fcmTokens is list && data.fcmTokens.size() <= 10 && (data.fcmTokens.size() == 0 || data.fcmTokens[0] is string)))
         && (!('categories' in data) || (data.categories is map && data.categories.keys().size() <= 10))
         && data.updatedAt is timestamp;
     }
@@ -445,12 +460,14 @@ service cloud.firestore {
         request.auth.uid == userId
         || isPrimaryAdmin()
         || hasDelegatedPermission('users.read')
+        || hasDelegatedPermission('users.manage')
       );
 
       allow list: if isSignedIn() && (
         resource.data.uid == request.auth.uid
         || isPrimaryAdmin()
         || hasDelegatedPermission('users.read')
+        || hasDelegatedPermission('users.manage')
       );
 
       // Autocadastro público cria exclusivamente conta básica ['candidate']
@@ -467,10 +484,11 @@ service cloud.firestore {
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
 
-      // Usuário só atualiza dados cadastrais básicos; cargos e aprovação de Tag são exclusivos do Backend Render
+      // Usuário só atualiza dados cadastrais básicos (conta não suspensa); cargos e aprovação de Tag são exclusivos do Backend Render
       allow update: if isValidId(userId)
         && isVerifiedUser()
         && request.auth.uid == userId
+        && existing().status != 'suspended'
         && isValidUserPrivate(incoming())
         && incoming().uid == existing().uid
         && incoming().createdAt == existing().createdAt
@@ -530,10 +548,23 @@ service cloud.firestore {
           || hasDelegatedPermission('users.manage')
           || (
             request.auth.uid == profileId
+            && hasUserDoc()
+            && currentUserDoc().status == 'active'
             && incoming().diff(existing()).affectedKeys().hasOnly([
               'avatarUrl', 'bannerUrl', 'bio', 'layout', 'socialLinks',
-              'showInEntrySelector', 'brawlTag', 'updatedAt'
+              'showInEntrySelector', 'brawlTag', 'brawlTagApproved', 'updatedAt'
             ])
+            && (
+              !('brawlTagApproved' in incoming())
+              || incoming().brawlTagApproved == false
+              || ('brawlTagApproved' in existing() && incoming().brawlTagApproved == existing().brawlTagApproved)
+            )
+            && (
+              !('brawlTag' in incoming())
+              || ('brawlTag' in existing() && incoming().brawlTag == existing().brawlTag)
+              || !('brawlTagApproved' in incoming())
+              || incoming().brawlTagApproved == false
+            )
           )
         );
     }
@@ -562,7 +593,7 @@ service cloud.firestore {
         && incoming().id == existing().id
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && canManageTeam(teamId);
+        && (isPrimaryAdmin() || hasDelegatedPermission('teams.manage') || (isActiveUserWithRole('manager') && isTeamMemberWithRole(teamId, ['manager'])));
 
       allow delete: if isValidId(teamId) && isPrimaryAdmin();
     }
@@ -580,23 +611,9 @@ service cloud.firestore {
         || isAnyAdmin()
       );
 
-      allow create: if isValidId(membershipId)
-        && isVerifiedUser()
-        && isValidTeamMembership(incoming())
-        && membershipId == incoming().teamId + '_' + incoming().uid
-        && exists(/databases/$(database)/documents/teams/$(incoming().teamId))
-        && incoming().joinedAt == request.time
-        && canManageTeam(incoming().teamId);
-
-      allow update: if isValidId(membershipId)
-        && isVerifiedUser()
-        && isValidTeamMembership(incoming())
-        && incoming().teamId == existing().teamId
-        && incoming().uid == existing().uid
-        && incoming().joinedAt == existing().joinedAt
-        && canManageTeam(existing().teamId);
-
-      allow delete: if isValidId(membershipId) && isPrimaryAdmin();
+      // Escrita de vínculos de elenco ocorre exclusivamente via Backend Admin SDK (/api/teams/:teamId/memberships*)
+      // garantindo sincronização atômica de users.teamIds, publicProfiles.teamIds e auditLogs.
+      allow create, update, delete: if false;
     }
 
     // =========================================================================
@@ -649,14 +666,20 @@ service cloud.firestore {
         resource.data.applicantUid == request.auth.uid
         || isPrimaryAdmin()
         || hasDelegatedPermission('recruitment.manage')
-        || ((isActiveUserWithRole('manager') || isActiveUserWithRole('coach')) && isTeamMemberWithRole(resource.data.teamId, ['manager', 'coach']))
+        || (
+          (isActiveUserWithRole('manager') || isActiveUserWithRole('coach'))
+          && (
+            hasUserTeam(resource.data.teamId)
+            || isTeamMemberWithRole(resource.data.teamId, ['manager', 'coach'])
+          )
+        )
       );
 
       allow list: if isVerifiedUser() && (
         resource.data.applicantUid == request.auth.uid
         || isPrimaryAdmin()
         || hasDelegatedPermission('recruitment.manage')
-        || ((isActiveUserWithRole('manager') || isActiveUserWithRole('coach')) && isTeamMemberWithRole(resource.data.teamId, ['manager', 'coach']))
+        || ((isActiveUserWithRole('manager') || isActiveUserWithRole('coach')) && hasUserTeam(resource.data.teamId))
       );
 
       allow create: if isValidId(applicationId)
@@ -665,9 +688,9 @@ service cloud.firestore {
         && applicationId == incoming().vacancyId + '_' + request.auth.uid
         && incoming().applicantUid == request.auth.uid
         && incoming().stage == 'recebida'
-        && !('internalNotes' in incoming())
         && exists(/databases/$(database)/documents/vacancies/$(incoming().vacancyId))
         && get(/databases/$(database)/documents/vacancies/$(incoming().vacancyId)).data.status == 'open'
+        && get(/databases/$(database)/documents/vacancies/$(incoming().vacancyId)).data.teamId == incoming().teamId
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
 
@@ -687,7 +710,63 @@ service cloud.firestore {
           || (
             (isActiveUserWithRole('manager') || isActiveUserWithRole('coach'))
             && isTeamMemberWithRole(existing().teamId, ['manager', 'coach'])
-            && incoming().diff(existing()).affectedKeys().hasOnly(['stage', 'internalNotes', 'updatedAt'])
+            && incoming().diff(existing()).affectedKeys().hasOnly(['stage', 'updatedAt'])
+          )
+        );
+
+      allow delete: if isValidId(applicationId) && isPrimaryAdmin();
+    }
+
+    // Notas internas de recrutamento isoladas (candidatos, visitantes e jogadores nunca têm acesso)
+    match /applicationNotes/{applicationId} {
+      allow get: if isValidId(applicationId) && isVerifiedUser() && (
+        isPrimaryAdmin()
+        || hasDelegatedPermission('recruitment.manage')
+        || (
+          (isActiveUserWithRole('manager') || isActiveUserWithRole('coach'))
+          && (
+            hasUserTeam(resource.data.teamId)
+            || isTeamMemberWithRole(resource.data.teamId, ['manager', 'coach'])
+          )
+        )
+      );
+
+      allow list: if isVerifiedUser() && (
+        isPrimaryAdmin()
+        || hasDelegatedPermission('recruitment.manage')
+        || ((isActiveUserWithRole('manager') || isActiveUserWithRole('coach')) && hasUserTeam(resource.data.teamId))
+      );
+
+      allow create: if isValidId(applicationId)
+        && isVerifiedUser()
+        && isValidApplicationNote(incoming())
+        && incoming().applicationId == applicationId
+        && incoming().updatedBy == request.auth.uid
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/applications/$(applicationId))
+        && get(/databases/$(database)/documents/applications/$(applicationId)).data.teamId == incoming().teamId
+        && (
+          isPrimaryAdmin()
+          || hasDelegatedPermission('recruitment.manage')
+          || (
+            (isActiveUserWithRole('manager') || isActiveUserWithRole('coach'))
+            && isTeamMemberWithRole(incoming().teamId, ['manager', 'coach'])
+          )
+        );
+
+      allow update: if isValidId(applicationId)
+        && isVerifiedUser()
+        && isValidApplicationNote(incoming())
+        && incoming().applicationId == existing().applicationId
+        && incoming().teamId == existing().teamId
+        && incoming().updatedBy == request.auth.uid
+        && incoming().updatedAt == request.time
+        && (
+          isPrimaryAdmin()
+          || hasDelegatedPermission('recruitment.manage')
+          || (
+            (isActiveUserWithRole('manager') || isActiveUserWithRole('coach'))
+            && isTeamMemberWithRole(existing().teamId, ['manager', 'coach'])
           )
         );
 
@@ -706,14 +785,14 @@ service cloud.firestore {
         && isValidTournament(incoming())
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
-        && (isPrimaryAdmin() || hasDelegatedPermission('competitive.manage') || isActiveUserWithRole('manager'));
+        && (isPrimaryAdmin() || hasDelegatedPermission('competitive.manage') || isActiveUserWithRole('manager') || isActiveUserWithRole('coach'));
 
       allow update: if isValidId(tournamentId)
         && isVerifiedUser()
         && isValidTournament(incoming())
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && (isPrimaryAdmin() || hasDelegatedPermission('competitive.manage') || isActiveUserWithRole('manager'));
+        && (isPrimaryAdmin() || hasDelegatedPermission('competitive.manage') || isActiveUserWithRole('manager') || isActiveUserWithRole('coach'));
 
       allow delete: if isValidId(tournamentId) && isPrimaryAdmin();
     }
@@ -735,6 +814,7 @@ service cloud.firestore {
         && isVerifiedUser()
         && isValidMatch(incoming())
         && incoming().teamId == existing().teamId
+        && incoming().enteredBy == existing().enteredBy
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
@@ -751,12 +831,13 @@ service cloud.firestore {
     match /trainings/{trainingId} {
       allow get: if isValidId(trainingId) && isVerifiedUser() && (
         isAnyAdmin()
+        || (isOfficialMember() && hasUserTeam(resource.data.teamId))
         || isTeamMemberWithRole(resource.data.teamId, ['manager', 'coach', 'starter', 'reserve', 'analyst'])
       );
 
       allow list: if isVerifiedUser() && (
         isAnyAdmin()
-        || isTeamMemberWithRole(resource.data.teamId, ['manager', 'coach', 'starter', 'reserve', 'analyst'])
+        || (isOfficialMember() && hasUserTeam(resource.data.teamId))
       );
 
       allow create: if isValidId(trainingId)
@@ -766,7 +847,7 @@ service cloud.firestore {
         && exists(/databases/$(database)/documents/teams/$(incoming().teamId))
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
-        && canManageTeam(incoming().teamId);
+        && (canManageTeam(incoming().teamId) || hasDelegatedPermission('trainings.manage'));
 
       allow update: if isValidId(trainingId)
         && isVerifiedUser()
@@ -775,7 +856,13 @@ service cloud.firestore {
         && incoming().createdBy == existing().createdBy
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && (isPrimaryAdmin() || (existing().status != 'completed' && canManageTeam(existing().teamId)));
+        && (
+          isPrimaryAdmin()
+          || (
+            existing().status != 'completed'
+            && (canManageTeam(existing().teamId) || hasDelegatedPermission('trainings.manage'))
+          )
+        );
 
       allow delete: if isValidId(trainingId) && isPrimaryAdmin();
     }
@@ -784,13 +871,19 @@ service cloud.firestore {
       allow get: if isValidId(attendanceId) && isVerifiedUser() && (
         resource.data.uid == request.auth.uid
         || isAnyAdmin()
-        || isTeamMemberWithRole(resource.data.teamId, ['manager', 'coach'])
+        || (
+          (isActiveUserWithRole('manager') || isActiveUserWithRole('coach'))
+          && (
+            hasUserTeam(resource.data.teamId)
+            || isTeamMemberWithRole(resource.data.teamId, ['manager', 'coach'])
+          )
+        )
       );
 
       allow list: if isVerifiedUser() && (
         resource.data.uid == request.auth.uid
         || isAnyAdmin()
-        || isTeamMemberWithRole(resource.data.teamId, ['manager', 'coach'])
+        || ((isActiveUserWithRole('manager') || isActiveUserWithRole('coach')) && hasUserTeam(resource.data.teamId))
       );
 
       allow create: if isValidId(attendanceId)
@@ -798,14 +891,19 @@ service cloud.firestore {
         && isValidAttendance(incoming())
         && attendanceId == incoming().trainingId + '_' + incoming().uid
         && exists(/databases/$(database)/documents/trainings/$(incoming().trainingId))
+        && get(/databases/$(database)/documents/trainings/$(incoming().trainingId)).data.teamId == incoming().teamId
         && incoming().updatedAt == request.time
         && (
           (
             incoming().uid == request.auth.uid
             && incoming().coachVerifiedStatus == 'unmarked'
-            && isTeamMemberWithRole(incoming().teamId, ['starter', 'reserve', 'coach', 'manager'])
+            && (
+              (isOfficialMember() && hasUserTeam(incoming().teamId))
+              || isTeamMemberWithRole(incoming().teamId, ['starter', 'reserve', 'coach', 'manager'])
+            )
           )
           || canManageTeam(incoming().teamId)
+          || hasDelegatedPermission('trainings.manage')
         );
 
       allow update: if isValidId(attendanceId)
@@ -817,9 +915,10 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && (
           canManageTeam(existing().teamId)
+          || hasDelegatedPermission('trainings.manage')
           || (
             existing().uid == request.auth.uid
-            && incoming().diff(existing()).affectedKeys().hasOnly(['playerStatus', 'justification', 'updatedAt'])
+            && incoming().diff(existing()).affectedKeys().hasOnly(['playerStatus', 'justification', 'nickname', 'updatedAt'])
           )
         );
 
@@ -1052,14 +1151,17 @@ service cloud.firestore {
         && incoming().requesterUid == existing().requesterUid
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && (isPrimaryAdmin() || hasDelegatedPermission('system.manage'));
+        && (
+          isPrimaryAdmin()
+          || (existing().status != 'resolvido' && hasDelegatedPermission('system.manage'))
+        );
 
       allow delete: if isValidId(ticketId) && isPrimaryAdmin();
     }
 
     match /systemSettings/{settingId} {
-      allow get: if isValidId(settingId) && isOfficialMember();
-      allow list: if isOfficialMember();
+      allow get: if isValidId(settingId) && isAnyAdmin();
+      allow list: if isAnyAdmin();
       allow create, update, delete: if false;
     }
 

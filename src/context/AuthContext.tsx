@@ -222,9 +222,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [userDoc, adminGrant, tokenClaims]
   );
 
-  // Assinatura de systemSettings restrita apenas a membros oficiais e administradores
+  // Assinatura de systemSettings restrita exclusivamente a administradores ativos
   useEffect(() => {
-    if (!authReady || !firebaseUser || !capabilities.isOfficialMember) {
+    if (!authReady || !firebaseUser || !capabilities.isAnyAdmin) {
       setSystemSettings(null);
       return;
     }
@@ -240,7 +240,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     );
 
     return () => unsubSettings();
-  }, [authReady, firebaseUser, capabilities.isOfficialMember]);
+  }, [authReady, firebaseUser, capabilities.isAnyAdmin]);
 
   const signInWithCode = async (code: string, password: string): Promise<SignInResult> => {
     const normalized = normalizePlayerCode(code);

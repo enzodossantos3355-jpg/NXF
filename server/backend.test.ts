@@ -38,6 +38,8 @@ import {
   hasExplicitAdminCredentials,
 } from './firebaseAdmin.ts';
 import { normalizePublicBaseUrl } from './routes.ts';
+import { resolveServerCapabilities } from './permissions.ts';
+import { endTeamMembership, upsertTeamMembership } from './rosterService.ts';
 
 type PlainRecord = Record<string, unknown>;
 
@@ -824,3 +826,180 @@ test('Firebase Admin config usa exclusivamente variáveis de ambiente e banco pa
     else process.env.GOOGLE_APPLICATION_CREDENTIALS = prevGac;
   }
 });
+
+test('Roster Service sincroniza users.teamIds e publicProfiles.teamIds atomicamente e bloqueia acesso cruzado', async () => {
+  const { db, store } = createMockFirestore({
+    'teams/team-a': { id: 'team-a', name: 'NXF Alpha', active: true },
+    'teams/team-b': { id: 'team-b', name: 'NXF Beta', active: true },
+    'users/mgrA': {
+      uid: 'mgrA',
+      fullName: 'Gestor A',
+      displayName: 'MgrA',
+      code: '#MGRA',
+      roles: ['manager'],
+      teamIds: ['team-a'],
+      status: 'active',
+    },
+    'users/coachA': {
+      uid: 'coachA',
+      fullName: 'Coach A',
+      displayName: 'CoachA',
+      code: '#COACHA',
+      roles: ['coach'],
+      teamIds: ['team-a'],
+      status: 'active',
+    },
+    'users/player1': {
+      uid: 'player1',
+      fullName: 'Jogador Um',
+      displayName: 'Player1',
+      code: '#PLY1',
+      roles: ['player'],
+      teamIds: ['team-b'],
+      status: 'active',
+    },
+    'publicProfiles/player1': {
+      uid: 'player1',
+      nickname: 'Player1',
+      teamIds: ['team-b'],
+    },
+    'users/susp1': {
+      uid: 'susp1',
+      fullName: 'Suspenso',
+      displayName: 'Susp1',
+      code: '#SUSP1',
+      roles: ['player'],
+      teamIds: [],
+      status: 'suspended',
+    },
+    'teamMemberships/team-a_mgrA': {
+      teamId: 'team-a',
+      uid: 'mgrA',
+      nickname: 'MgrA',
+      roleInTeam: 'manager',
+      status: 'active',
+    },
+    'teamMemberships/team-b_player1': {
+      teamId: 'team-b',
+      uid: 'player1',
+      nickname: 'Player1',
+      roleInTeam: 'starter',
+      status: 'active',
+    },
+  });
+
+  const mgrActor = {
+    uid: 'mgrA',
+    displayName: 'MgrA',
+    capabilities: resolveServerCapabilities(store.get('users/mgrA') as never, null),
+  };
+  const coachActor = {
+    uid: 'coachA',
+    displayName: 'CoachA',
+    capabilities: resolveServerCapabilities(store.get('users/coachA') as never, null),
+  };
+  const primaryActor = {
+    uid: 'admin1',
+    displayName: 'Admin1',
+    capabilities: resolveServerCapabilities(
+      {
+        uid: 'admin1',
+        fullName: 'Admin',
+        displayName: 'Admin1',
+        code: '#ADM1',
+        roles: ['primary_admin'],
+        status: 'active',
+      },
+      {
+        uid: 'admin1',
+        role: 'primary_admin',
+        permissions: ['*'],
+        active: true,
+        grantedBy: 'admin1',
+      }
+    ),
+  };
+
+  // Coach não pode gerenciar vínculos de elenco
+  const coachDenied = await upsertTeamMembership(db, coachActor, {
+    teamId: 'team-a',
+    targetUid: 'player1',
+    nickname: 'Player1',
+    roleInTeam: 'starter',
+  });
+  assert.equal(coachDenied.ok, false);
+  assert.equal(coachDenied.status, 403);
+
+  // Gestor de team-a NÃO pode alterar elenco de team-b
+  const crossTeamDenied = await upsertTeamMembership(db, mgrActor, {
+    teamId: 'team-b',
+    targetUid: 'player1',
+    nickname: 'Player1',
+    roleInTeam: 'reserve',
+  });
+  assert.equal(crossTeamDenied.ok, false);
+  assert.equal(crossTeamDenied.status, 403);
+
+  // Usuário suspenso não pode ser vinculado
+  const suspendedDenied = await upsertTeamMembership(db, mgrActor, {
+    teamId: 'team-a',
+    targetUid: 'susp1',
+    nickname: 'Susp1',
+    roleInTeam: 'starter',
+  });
+  assert.equal(suspendedDenied.ok, false);
+  assert.equal(suspendedDenied.status, 400);
+
+  // Gestor de team-a adiciona player1 em team-a -> users.teamIds e publicProfiles.teamIds incluem team-b e team-a
+  const added = await upsertTeamMembership(db, mgrActor, {
+    teamId: 'team-a',
+    targetUid: 'player1',
+    nickname: 'Player1',
+    roleInTeam: 'starter',
+  });
+  assert.equal(added.ok, true);
+  assert.deepEqual(new Set(added.teamIds), new Set(['team-b', 'team-a']));
+  assert.equal(store.get('teamMemberships/team-a_player1')?.status, 'active');
+  assert.deepEqual(
+    new Set(store.get('users/player1')?.teamIds as string[]),
+    new Set(['team-b', 'team-a'])
+  );
+  assert.deepEqual(
+    new Set(store.get('publicProfiles/player1')?.teamIds as string[]),
+    new Set(['team-b', 'team-a'])
+  );
+
+  // Gestor de team-a NÃO pode encerrar vínculo de team-b
+  const crossEndDenied = await endTeamMembership(db, mgrActor, {
+    teamId: 'team-b',
+    targetUid: 'player1',
+  });
+  assert.equal(crossEndDenied.ok, false);
+  assert.equal(crossEndDenied.status, 403);
+
+  // Gestor de team-a encerra vínculo de team-a -> team-a sai de users.teamIds mantendo team-b ativo
+  const ended = await endTeamMembership(db, mgrActor, {
+    teamId: 'team-a',
+    targetUid: 'player1',
+  });
+  assert.equal(ended.ok, true);
+  assert.deepEqual(ended.teamIds, ['team-b']);
+  assert.equal(store.get('teamMemberships/team-a_player1')?.status, 'transferred');
+  assert.deepEqual(store.get('users/player1')?.teamIds, ['team-b']);
+  assert.deepEqual(store.get('publicProfiles/player1')?.teamIds, ['team-b']);
+
+  // Administrador Principal consegue encerrar vínculo de team-b -> teamIds fica vazio
+  const adminEnded = await endTeamMembership(db, primaryActor, {
+    teamId: 'team-b',
+    targetUid: 'player1',
+  });
+  assert.equal(adminEnded.ok, true);
+  assert.deepEqual(adminEnded.teamIds, []);
+  assert.deepEqual(store.get('users/player1')?.teamIds, []);
+  assert.deepEqual(store.get('publicProfiles/player1')?.teamIds, []);
+
+  // Verifica trilha de auditoria gravada
+  const auditEntries = Array.from(store.entries()).filter(([k]) => k.startsWith('auditLogs/'));
+  assert.equal(auditEntries.length, 3);
+});
+

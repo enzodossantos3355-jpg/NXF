@@ -7,7 +7,6 @@ import {
   query,
   serverTimestamp,
   setDoc,
-  updateDoc,
   where,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../../lib/firebase';
@@ -43,8 +42,37 @@ export function OrganizationPage() {
   const [inviteRole, setInviteRole] = useState<UserRole>('player');
   const [inviteTeamId, setInviteTeamId] = useState('');
   const [inviteTeamRole, setInviteTeamRole] = useState<TeamMembership['roleInTeam']>('starter');
+  const [savingMembership, setSavingMembership] = useState(false);
   const [feedback, setFeedback] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+
+  const hasGlobalOrgAuthority =
+    capabilities.isPrimaryAdmin ||
+    capabilities.permissions.includes('teams.manage') ||
+    capabilities.permissions.includes('users.manage');
+
+  const canCreateTeams =
+    capabilities.isPrimaryAdmin || capabilities.permissions.includes('teams.manage');
+
+  const managedTeamIds = new Set(
+    firebaseUser
+      ? memberships
+          .filter(
+            (m) =>
+              m.uid === firebaseUser.uid &&
+              m.status === 'active' &&
+              m.roleInTeam === 'manager'
+          )
+          .map((m) => m.teamId)
+      : []
+  );
+
+  const canManageTeamRoster = (teamId: string) =>
+    hasGlobalOrgAuthority || (capabilities.isManager && managedTeamIds.has(teamId));
+
+  const manageableTeams = hasGlobalOrgAuthority
+    ? teams
+    : teams.filter((t) => managedTeamIds.has(t.id));
 
   useEffect(() => {
     const u1 = onSnapshot(
@@ -117,36 +145,50 @@ export function OrganizationPage() {
   const handleAddMembership = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
-    if (!memberTeamId || !memberUid.trim() || !memberNickname.trim()) return;
-    const cleanUid = memberUid.trim();
-    const docId = `${memberTeamId}_${cleanUid}`;
+    setFeedback('');
+    const targetTeamId =
+      memberTeamId && canManageTeamRoster(memberTeamId)
+        ? memberTeamId
+        : manageableTeams[0]?.id || '';
+    if (!targetTeamId || !memberUid.trim() || !memberNickname.trim()) return;
+    setSavingMembership(true);
     try {
-      await setDoc(doc(db, 'teamMemberships', docId), {
-        teamId: memberTeamId,
-        uid: cleanUid,
-        nickname: memberNickname.trim().slice(0, BLUEPRINT_LIMITS.NICKNAME_MAX),
-        roleInTeam: memberRole,
-        status: 'active',
-        joinedAt: serverTimestamp(),
+      await apiFetch(`/api/teams/${encodeURIComponent(targetTeamId)}/memberships`, {
+        method: 'POST',
+        body: {
+          uid: memberUid.trim(),
+          nickname: memberNickname.trim().slice(0, BLUEPRINT_LIMITS.NICKNAME_MAX),
+          roleInTeam: memberRole,
+        },
       });
       setMemberUid('');
       setMemberNickname('');
-      setFeedback('Vínculo de elenco registrado com sucesso.');
+      setFeedback('Vínculo de elenco registrado no servidor e equipes do usuário sincronizadas.');
     } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, `teamMemberships/${docId}`);
+      setErrorMsg(
+        err instanceof Error ? err.message : 'Erro ao registrar vínculo de elenco no servidor.'
+      );
+    } finally {
+      setSavingMembership(false);
     }
   };
 
   const handleEndMembership = async (m: TeamMembership) => {
-    if (!m.id) return;
+    if (!m.teamId || !m.uid) return;
+    setErrorMsg('');
+    setFeedback('');
     try {
-      await updateDoc(doc(db, 'teamMemberships', m.id), {
-        status: 'transferred',
-        endedAt: serverTimestamp(),
-      });
-      setFeedback(`Vínculo de ${m.nickname} encerrado no histórico.`);
+      await apiFetch(
+        `/api/teams/${encodeURIComponent(m.teamId)}/memberships/${encodeURIComponent(m.uid)}/end`,
+        {
+          method: 'POST',
+        }
+      );
+      setFeedback(`Vínculo de ${m.nickname} encerrado e equipes do usuário sincronizadas.`);
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `teamMemberships/${m.id}`);
+      setErrorMsg(
+        err instanceof Error ? err.message : 'Erro ao encerrar vínculo de elenco no servidor.'
+      );
     }
   };
 
@@ -198,48 +240,50 @@ export function OrganizationPage() {
 
       {capabilities.isAnyAdmin && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <form
-            onSubmit={handleCreateTeam}
-            className="bg-[#15151A] border border-white/8 rounded-lg p-5 space-y-4"
-          >
-            <h2 className="text-base font-bold text-white flex items-center gap-2">
-              <Plus className="w-4 h-4 text-[#EF3340]" /> Nova Equipe / Divisão
-            </h2>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <input
-                type="text"
-                required
-                minLength={2}
-                maxLength={60}
-                value={teamName}
-                onChange={(e) => setTeamName(e.target.value)}
-                placeholder="Nome (ex.: NXF Alpha)"
-                className="bg-[#0D0D10] border border-white/12 rounded px-3 py-2 text-sm text-white"
-              />
-              <input
-                type="text"
-                required
-                value={teamCategory}
-                onChange={(e) => setTeamCategory(e.target.value)}
-                placeholder="Categoria (ex.: Série A)"
-                className="bg-[#0D0D10] border border-white/12 rounded px-3 py-2 text-sm text-white"
-              />
-            </div>
-            <textarea
-              rows={2}
-              maxLength={1000}
-              value={teamDesc}
-              onChange={(e) => setTeamDesc(e.target.value)}
-              placeholder="Descrição competitiva da equipe"
-              className="w-full bg-[#0D0D10] border border-white/12 rounded px-3 py-2 text-sm text-white"
-            />
-            <button
-              type="submit"
-              className="px-4 py-2 bg-[#DC172B] hover:bg-[#EF3340] text-xs font-semibold text-white rounded"
+          {canCreateTeams && (
+            <form
+              onSubmit={handleCreateTeam}
+              className="bg-[#15151A] border border-white/8 rounded-lg p-5 space-y-4"
             >
-              Cadastrar equipe
-            </button>
-          </form>
+              <h2 className="text-base font-bold text-white flex items-center gap-2">
+                <Plus className="w-4 h-4 text-[#EF3340]" /> Nova Equipe / Divisão
+              </h2>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <input
+                  type="text"
+                  required
+                  minLength={2}
+                  maxLength={60}
+                  value={teamName}
+                  onChange={(e) => setTeamName(e.target.value)}
+                  placeholder="Nome (ex.: NXF Alpha)"
+                  className="bg-[#0D0D10] border border-white/12 rounded px-3 py-2 text-sm text-white"
+                />
+                <input
+                  type="text"
+                  required
+                  value={teamCategory}
+                  onChange={(e) => setTeamCategory(e.target.value)}
+                  placeholder="Categoria (ex.: Série A)"
+                  className="bg-[#0D0D10] border border-white/12 rounded px-3 py-2 text-sm text-white"
+                />
+              </div>
+              <textarea
+                rows={2}
+                maxLength={1000}
+                value={teamDesc}
+                onChange={(e) => setTeamDesc(e.target.value)}
+                placeholder="Descrição competitiva da equipe"
+                className="w-full bg-[#0D0D10] border border-white/12 rounded px-3 py-2 text-sm text-white"
+              />
+              <button
+                type="submit"
+                className="px-4 py-2 bg-[#DC172B] hover:bg-[#EF3340] text-xs font-semibold text-white rounded"
+              >
+                Cadastrar equipe
+              </button>
+            </form>
+          )}
 
           <form
             onSubmit={handleCreateInvitation}
@@ -304,7 +348,7 @@ export function OrganizationPage() {
         </div>
       )}
 
-      {capabilities.canManageOrg && teams.length > 0 && (
+      {capabilities.canManageOrg && manageableTeams.length > 0 && (
         <form
           onSubmit={handleAddMembership}
           className="bg-[#15151A] border border-white/8 rounded-lg p-5 space-y-4"
@@ -314,11 +358,15 @@ export function OrganizationPage() {
           </h2>
           <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
             <select
-              value={memberTeamId}
+              value={
+                memberTeamId && canManageTeamRoster(memberTeamId)
+                  ? memberTeamId
+                  : manageableTeams[0]?.id || ''
+              }
               onChange={(e) => setMemberTeamId(e.target.value)}
               className="bg-[#0D0D10] border border-white/12 rounded px-3 py-2 text-xs text-white"
             >
-              {teams.map((t) => (
+              {manageableTeams.map((t) => (
                 <option key={t.id} value={t.id}>
                   {t.name}
                 </option>
@@ -354,9 +402,10 @@ export function OrganizationPage() {
           </div>
           <button
             type="submit"
-            className="px-4 py-2 bg-[#DC172B] hover:bg-[#EF3340] text-xs font-semibold text-white rounded"
+            disabled={savingMembership}
+            className="px-4 py-2 bg-[#DC172B] hover:bg-[#EF3340] disabled:opacity-50 text-xs font-semibold text-white rounded"
           >
-            Salvar vínculo
+            {savingMembership ? 'Salvando vínculo...' : 'Salvar vínculo'}
           </button>
         </form>
       )}
@@ -407,7 +456,7 @@ export function OrganizationPage() {
                               <td className="py-2 text-[#A1A1AA]">{m.roleInTeam}</td>
                               <td className="py-2 font-mono-tabular text-[#71717A]">{m.uid}</td>
                               <td className="py-2 text-right">
-                                {capabilities.canManageOrg && (
+                                {canManageTeamRoster(m.teamId) && (
                                   <button
                                     type="button"
                                     onClick={() => void handleEndMembership(m)}

@@ -124,6 +124,7 @@ export function ProfileSettingsPage() {
       });
 
       if (publicProfile) {
+        const tagChanged = cleanTag !== (publicProfile.brawlTag || '');
         await updateDoc(doc(db, 'publicProfiles', firebaseUser.uid), {
           avatarUrl: avatarUrl.trim().slice(0, BLUEPRINT_LIMITS.URL_MAX),
           bannerUrl: bannerUrl.trim().slice(0, BLUEPRINT_LIMITS.URL_MAX),
@@ -131,6 +132,7 @@ export function ProfileSettingsPage() {
           layout,
           showInEntrySelector,
           brawlTag: cleanTag,
+          ...(tagChanged ? { brawlTagApproved: false } : {}),
           socialLinks,
           updatedAt: serverTimestamp(),
         });

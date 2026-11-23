@@ -172,8 +172,16 @@ export interface Application {
   brawlTag?: string;
   answers?: Record<string, string>;
   stage: ApplicationStage;
-  internalNotes?: string;
   createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface ApplicationNote {
+  id: string;
+  applicationId: string;
+  teamId: string;
+  notes: string;
+  updatedBy: string;
   updatedAt?: unknown;
 }
 

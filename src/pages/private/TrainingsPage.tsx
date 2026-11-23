@@ -123,21 +123,32 @@ export function TrainingsPage() {
   ) => {
     if (!firebaseUser) return;
     const docId = `${training.id}_${firebaseUser.uid}`;
+    const existingAtt = (attendanceMap[training.id] || []).find(
+      (a) => a.uid === firebaseUser.uid
+    );
+    const cleanNick = (publicProfile?.nickname || userDoc?.displayName || 'Jogador').slice(0, 32);
+    const cleanJustification = status === 'declined' ? justification.slice(0, 400) : '';
+
     try {
-      await setDoc(
-        doc(db, 'attendance', docId),
-        {
+      if (existingAtt) {
+        await updateDoc(doc(db, 'attendance', docId), {
+          nickname: cleanNick,
+          playerStatus: status,
+          justification: cleanJustification,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        await setDoc(doc(db, 'attendance', docId), {
           trainingId: training.id,
           teamId: training.teamId,
           uid: firebaseUser.uid,
-          nickname: publicProfile?.nickname || userDoc?.displayName || 'Jogador',
+          nickname: cleanNick,
           playerStatus: status,
-          justification: status === 'declined' ? justification.slice(0, 400) : '',
+          justification: cleanJustification,
           coachVerifiedStatus: 'unmarked',
           updatedAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
+        });
+      }
       setJustification('');
       setFeedback(
         status === 'confirmed'

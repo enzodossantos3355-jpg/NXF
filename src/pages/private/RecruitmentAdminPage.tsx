@@ -8,13 +8,21 @@ import {
   orderBy,
   query,
   serverTimestamp,
+  setDoc,
   updateDoc,
   where,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../../lib/firebase';
 import { useAuth } from '../../context/AuthContext';
 import { EmptyState } from '../../components/common/StateViews';
-import type { Application, ApplicationStage, Team, Vacancy } from '../../types/nxf';
+import {
+  BLUEPRINT_LIMITS,
+  type Application,
+  type ApplicationNote,
+  type ApplicationStage,
+  type Team,
+  type Vacancy,
+} from '../../types/nxf';
 
 const STAGES: Array<{ id: ApplicationStage; label: string }> = [
   { id: 'recebida', label: 'Recebida' },
@@ -35,7 +43,9 @@ export function RecruitmentAdminPage() {
   const [vTitle, setVTitle] = useState('');
   const [vRoleTarget, setVRoleTarget] = useState('Jogador Titular');
   const [vReqs, setVReqs] = useState('');
+  const [savedNotes, setSavedNotes] = useState<Record<string, string>>({});
   const [notesDraft, setNotesDraft] = useState<Record<string, string>>({});
+  const [savingNoteId, setSavingNoteId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState('');
 
   useEffect(() => {
@@ -72,10 +82,42 @@ export function RecruitmentAdminPage() {
       () => {}
     );
 
+    let u4 = () => {};
+    if (hasGlobalRecruitment) {
+      u4 = onSnapshot(
+        collection(db, 'applicationNotes'),
+        (s) => {
+          const map: Record<string, string> = {};
+          s.docs.forEach((d) => {
+            const data = d.data() as Omit<ApplicationNote, 'id'>;
+            map[d.id] = data.notes || '';
+          });
+          setSavedNotes(map);
+        },
+        () => {}
+      );
+    } else if (capabilities.canManageRecruitment && scopedTeams.length > 0) {
+      u4 = onSnapshot(
+        query(collection(db, 'applicationNotes'), where('teamId', 'in', scopedTeams)),
+        (s) => {
+          const map: Record<string, string> = {};
+          s.docs.forEach((d) => {
+            const data = d.data() as Omit<ApplicationNote, 'id'>;
+            map[d.id] = data.notes || '';
+          });
+          setSavedNotes(map);
+        },
+        () => {}
+      );
+    } else {
+      setSavedNotes({});
+    }
+
     return () => {
       u1();
       u2();
       u3();
+      u4();
     };
   }, [
     firebaseUser,
@@ -110,13 +152,40 @@ export function RecruitmentAdminPage() {
     }
   };
 
+  const persistInternalNote = async (app: Application, rawNotes: string) => {
+    if (!firebaseUser) return;
+    await setDoc(doc(db, 'applicationNotes', app.id), {
+      applicationId: app.id,
+      teamId: app.teamId,
+      notes: rawNotes.slice(0, BLUEPRINT_LIMITS.NOTES_MAX),
+      updatedBy: firebaseUser.uid,
+      updatedAt: serverTimestamp(),
+    });
+  };
+
+  const handleSaveNote = async (app: Application) => {
+    if (!firebaseUser) return;
+    setSavingNoteId(app.id);
+    try {
+      const text = notesDraft[app.id] ?? savedNotes[app.id] ?? '';
+      await persistInternalNote(app, text);
+      setFeedback(`Nota interna privada salva para ${app.applicantName}.`);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `applicationNotes/${app.id}`);
+    } finally {
+      setSavingNoteId(null);
+    }
+  };
+
   const handleMoveStage = async (app: Application, nextStage: ApplicationStage) => {
     try {
       await updateDoc(doc(db, 'applications', app.id), {
         stage: nextStage,
-        internalNotes: notesDraft[app.id] ?? app.internalNotes ?? '',
         updatedAt: serverTimestamp(),
       });
+      if (notesDraft[app.id] !== undefined && notesDraft[app.id] !== (savedNotes[app.id] ?? '')) {
+        await persistInternalNote(app, notesDraft[app.id]);
+      }
       setFeedback(`Candidatura de ${app.applicantName} movida para ${nextStage}.`);
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, `applications/${app.id}`);
@@ -297,13 +366,22 @@ export function RecruitmentAdminPage() {
                       </p>
                       <textarea
                         rows={2}
-                        value={notesDraft[app.id] ?? app.internalNotes ?? ''}
+                        maxLength={BLUEPRINT_LIMITS.NOTES_MAX}
+                        value={notesDraft[app.id] ?? savedNotes[app.id] ?? ''}
                         onChange={(e) =>
                           setNotesDraft((prev) => ({ ...prev, [app.id]: e.target.value }))
                         }
-                        placeholder="Nota interna protegida..."
+                        placeholder="Nota interna privada (invisível ao candidato)..."
                         className="w-full bg-[#15151A] border border-white/10 rounded px-2 py-1 text-[11px] text-white"
                       />
+                      <button
+                        type="button"
+                        disabled={savingNoteId === app.id}
+                        onClick={() => void handleSaveNote(app)}
+                        className="w-full px-2 py-1 bg-[#202027] hover:bg-[#2B2B35] border border-white/10 disabled:opacity-50 rounded text-[11px] font-medium text-white"
+                      >
+                        {savingNoteId === app.id ? 'Salvando nota...' : 'Salvar nota interna'}
+                      </button>
                       {app.stage !== 'aprovada' && app.stage !== 'rejeitada' && (
                         <select
                           value={app.stage}

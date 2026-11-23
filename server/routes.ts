@@ -34,6 +34,7 @@ import {
   saveMediaBlob,
 } from './mediaService.ts';
 import { authenticateProfileByPassword } from './profileAuthService.ts';
+import { endTeamMembership, upsertTeamMembership } from './rosterService.ts';
 
 function timingSafeSecretEquals(provided: string, expected: string): boolean {
   const a = Buffer.from(provided, 'utf8');
@@ -1158,6 +1159,95 @@ export function createApiRouter() {
         }
         res.status(500).json({ ok: false, error: msg });
       }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Team Roster Memberships (Transactional + Atomic users.teamIds Sync)
+  // ---------------------------------------------------------------------------
+  router.post(
+    '/teams/:teamId/memberships',
+    requireAuth,
+    requireCapability((c) => c.canManageOrg),
+    async (req: AuthenticatedRequest, res: Response) => {
+      const { db } = getAdminServices();
+      if (!db) {
+        res.status(503).json({ ok: false, error: 'Firebase Admin SDK indisponível.' });
+        return;
+      }
+
+      const body = (req.body || {}) as {
+        uid?: string;
+        nickname?: string;
+        roleInTeam?: string;
+      };
+
+      const result = await upsertTeamMembership(
+        db,
+        {
+          uid: req.authContext!.uid,
+          displayName: req.authContext!.userDoc?.displayName || req.authContext!.uid,
+          capabilities: req.authContext!.capabilities,
+        },
+        {
+          teamId: req.params.teamId,
+          targetUid: String(body.uid || ''),
+          nickname: String(body.nickname || ''),
+          roleInTeam: String(body.roleInTeam || ''),
+        }
+      );
+
+      if (!result.ok) {
+        res.status(result.status).json({ ok: false, error: result.error });
+        return;
+      }
+
+      res.status(200).json({
+        ok: true,
+        membershipId: result.membershipId,
+        teamId: result.teamId,
+        uid: result.uid,
+        teamIds: result.teamIds,
+      });
+    }
+  );
+
+  router.post(
+    '/teams/:teamId/memberships/:targetUid/end',
+    requireAuth,
+    requireCapability((c) => c.canManageOrg),
+    async (req: AuthenticatedRequest, res: Response) => {
+      const { db } = getAdminServices();
+      if (!db) {
+        res.status(503).json({ ok: false, error: 'Firebase Admin SDK indisponível.' });
+        return;
+      }
+
+      const result = await endTeamMembership(
+        db,
+        {
+          uid: req.authContext!.uid,
+          displayName: req.authContext!.userDoc?.displayName || req.authContext!.uid,
+          capabilities: req.authContext!.capabilities,
+        },
+        {
+          teamId: req.params.teamId,
+          targetUid: req.params.targetUid,
+        }
+      );
+
+      if (!result.ok) {
+        res.status(result.status).json({ ok: false, error: result.error });
+        return;
+      }
+
+      res.status(200).json({
+        ok: true,
+        membershipId: result.membershipId,
+        teamId: result.teamId,
+        uid: result.uid,
+        teamIds: result.teamIds,
+      });
     }
   );
 
