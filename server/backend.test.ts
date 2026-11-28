@@ -59,6 +59,20 @@ import {
 import { normalizePublicBaseUrl } from './routes.ts';
 import { resolveServerCapabilities } from './permissions.ts';
 import { endTeamMembership, upsertTeamMembership } from './rosterService.ts';
+import {
+  buildPanelNavigation,
+  formatTeamRoleLabel,
+  resolveActiveNavItem,
+} from '../src/lib/panelNavigation.ts';
+import { resolveUnifiedCapabilities } from '../src/lib/permissions.ts';
+import {
+  buildMemberDirectory,
+  filterMemberDirectory,
+  formatTeamVisibilityLabel,
+  isTeamActive,
+  resolveTeamVisibility,
+  slugifyTeamId,
+} from '../src/lib/organizationHelpers.ts';
 
 type PlainRecord = Record<string, unknown>;
 
@@ -1781,5 +1795,199 @@ test('Tournament Engine: grupos MD3, desempate (Pts -> H2H -> Vitórias -> Empat
     }
   }
 });
+
+test('Navegação do painel agrupa domínios e respeita permissões de cada cargo', () => {
+  const makeUser = (roles: Array<'candidate' | 'player' | 'coach' | 'manager' | 'delegated_admin' | 'primary_admin'>) => ({
+    uid: `u_${roles.join('_')}`,
+    fullName: 'Teste NXF',
+    displayName: 'Teste',
+    code: '#TST001',
+    roles,
+    teamIds: ['team-test'],
+    status: 'active' as const,
+  });
+
+  // 1. Administrador Principal: vê os 4 grupos e todas as 9 rotas
+  const primaryCaps = resolveUnifiedCapabilities(makeUser(['primary_admin']), {
+    uid: 'u_primary_admin',
+    role: 'primary_admin',
+    permissions: ['*'],
+    active: true,
+    grantedBy: 'u_primary_admin',
+  });
+  const primaryGroups = buildPanelNavigation(primaryCaps);
+  assert.deepEqual(
+    primaryGroups.map((g) => g.label),
+    ['Visão Geral', 'Operação', 'Conteúdo', 'Administração']
+  );
+  const primaryPaths = primaryGroups.flatMap((g) => g.items.map((i) => i.to));
+  assert.deepEqual(primaryPaths, [
+    '/painel',
+    '/painel/perfil',
+    '/painel/notificacoes',
+    '/painel/organizacao',
+    '/painel/competitivo',
+    '/painel/treinamentos',
+    '/painel/recrutamento',
+    '/painel/studio',
+    '/painel/system',
+  ]);
+  assert.equal(resolveActiveNavItem(primaryGroups, '/painel')?.item.id, 'dashboard');
+  assert.equal(resolveActiveNavItem(primaryGroups, '/painel/organizacao/')?.group.id, 'operations');
+  assert.equal(resolveActiveNavItem(primaryGroups, '/painel/studio')?.group.id, 'content');
+  assert.equal(resolveActiveNavItem(primaryGroups, '/painel/system')?.group.id, 'administration');
+  assert.equal(resolveActiveNavItem(primaryGroups, '/rota-invalida'), null);
+
+  // 2. Admin Delegado somente teams.manage: sem grupo Conteúdo, mantém Administração
+  const delegatedTeamsCaps = resolveUnifiedCapabilities(makeUser(['delegated_admin']), {
+    uid: 'u_delegated_admin',
+    role: 'delegated_admin',
+    permissions: ['teams.manage'],
+    active: true,
+    grantedBy: 'u_primary_admin',
+  });
+  const delegatedTeamsGroups = buildPanelNavigation(delegatedTeamsCaps);
+  assert.deepEqual(
+    delegatedTeamsGroups.map((g) => g.label),
+    ['Visão Geral', 'Operação', 'Administração']
+  );
+
+  // 3. Admin Delegado com cms.manage: inclui Conteúdo (Portal e CMS)
+  const delegatedCmsCaps = resolveUnifiedCapabilities(makeUser(['delegated_admin']), {
+    uid: 'u_delegated_admin',
+    role: 'delegated_admin',
+    permissions: ['cms.manage'],
+    active: true,
+    grantedBy: 'u_primary_admin',
+  });
+  const delegatedCmsGroups = buildPanelNavigation(delegatedCmsCaps);
+  assert.deepEqual(
+    delegatedCmsGroups.map((g) => g.label),
+    ['Visão Geral', 'Operação', 'Conteúdo', 'Administração']
+  );
+
+  // 4. Manager, Coach e Player: somente Visão Geral e Operação (sem Conteúdo nem Administração)
+  for (const role of ['manager', 'coach', 'player'] as const) {
+    const caps = resolveUnifiedCapabilities(makeUser([role]), null);
+    const groups = buildPanelNavigation(caps);
+    assert.deepEqual(
+      groups.map((g) => g.label),
+      ['Visão Geral', 'Operação']
+    );
+    const paths = groups.flatMap((g) => g.items.map((i) => i.to));
+    assert(paths.includes('/painel/organizacao'));
+    assert(!paths.includes('/painel/studio'));
+    assert(!paths.includes('/painel/system'));
+  }
+
+  // 5. Candidato: vê Visão Geral e somente Recrutamento em Operação
+  const candidateCaps = resolveUnifiedCapabilities(makeUser(['candidate']), null);
+  const candidateGroups = buildPanelNavigation(candidateCaps);
+  assert.deepEqual(
+    candidateGroups.map((g) => g.label),
+    ['Visão Geral', 'Operação']
+  );
+  assert.deepEqual(
+    candidateGroups.find((g) => g.id === 'operations')?.items.map((i) => i.to),
+    ['/painel/recrutamento']
+  );
+
+  assert.equal(formatTeamRoleLabel('starter'), 'Titular');
+  assert.equal(formatTeamRoleLabel('manager'), 'Gerente');
+  assert.equal(formatTeamRoleLabel(undefined), 'Integrante');
+});
+
+test('Organization Helpers preservam equipes legadas e filtram diretório por nome, código ou Brawl Tag mantendo UID', () => {
+  // Equipe legada sem campos opcionais (ex.: documento existente criado fora do fluxo atual)
+  const legacyTeam = { id: 'chifre', name: 'Chifre' };
+  assert.equal(resolveTeamVisibility(legacyTeam), 'unknown');
+  assert.equal(formatTeamVisibilityLabel(legacyTeam), 'Visibilidade não definida');
+  assert.equal(isTeamActive(legacyTeam), true);
+
+  assert.equal(formatTeamVisibilityLabel({ id: 'a', name: 'Alpha', isPublic: true }), 'Pública no portal');
+  assert.equal(formatTeamVisibilityLabel({ id: 'b', name: 'Beta', isPublic: false }), 'Interna');
+  assert.equal(isTeamActive({ id: 'c', name: 'Archived', active: false }), false);
+
+  assert.equal(slugifyTeamId('  NXF Fúria Academy 2026! '), 'nxf-furia-academy-2026');
+
+  const directory = buildMemberDirectory({
+    users: [
+      {
+        uid: 'uid_alpha_1',
+        fullName: 'Lucas Silva',
+        displayName: 'FuryLux',
+        code: '#NXF101',
+        brawlTag: '#2PP99AA',
+        roles: ['player'],
+        status: 'active',
+      },
+      {
+        uid: 'uid_susp_1',
+        fullName: 'Conta Suspensa',
+        displayName: 'BlockedUser',
+        code: '#SUSP99',
+        roles: ['player'],
+        status: 'suspended',
+      },
+    ],
+    publicProfiles: [
+      {
+        uid: 'uid_alpha_1',
+        nickname: 'FuryLux',
+        publicRole: 'Jogador',
+        layout: 'competitive',
+        brawlTag: '#2PP99AA',
+        isActiveMember: true,
+        showInEntrySelector: true,
+        moderationStatus: 'approved',
+      },
+      {
+        uid: 'uid_public_2',
+        nickname: 'VortexBR',
+        publicRole: 'Jogador',
+        layout: 'competitive',
+        brawlTag: '#88QQVTX',
+        isActiveMember: true,
+        showInEntrySelector: true,
+        moderationStatus: 'approved',
+      },
+    ],
+    memberships: [
+      {
+        id: 'chifre_uid_legacy_3',
+        teamId: 'chifre',
+        uid: 'uid_legacy_3',
+        nickname: 'LegacyCap',
+        roleInTeam: 'manager',
+        status: 'active',
+      },
+    ],
+  });
+
+  // Usuário suspenso não entra no seletor; 3 integrantes válidos ordenados por displayName
+  assert.equal(directory.length, 3);
+  assert.equal(directory.some((m) => m.uid === 'uid_susp_1'), false);
+
+  // Busca por Brawl Tag sem '#' retorna o membro correto preservando o UID interno
+  const byTag = filterMemberDirectory(directory, '88qqvtx');
+  assert.equal(byTag.length, 1);
+  assert.equal(byTag[0].uid, 'uid_public_2');
+
+  // Busca por código NXF com '#' retorna o membro correto
+  const byCode = filterMemberDirectory(directory, '#nxf101');
+  assert.equal(byCode.length, 1);
+  assert.equal(byCode[0].uid, 'uid_alpha_1');
+
+  // Busca por nome completo retorna mesmo quando displayName difere
+  const byFullName = filterMemberDirectory(directory, 'lucas silva');
+  assert.equal(byFullName.length, 1);
+  assert.equal(byFullName[0].uid, 'uid_alpha_1');
+
+  // Busca por apelido de integrante oriundo de membership legado
+  const byLegacyNick = filterMemberDirectory(directory, 'legacycap');
+  assert.equal(byLegacyNick.length, 1);
+  assert.equal(byLegacyNick[0].uid, 'uid_legacy_3');
+});
+
 
 
