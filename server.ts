@@ -4,6 +4,7 @@ import path from 'node:path';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { createApiRouter } from './server/routes.ts';
 import { startBrawlStarsScheduler } from './server/brawlStarsService.ts';
+import { startMatchTrackerScheduler } from './server/matchTrackerService.ts';
 import { startNewsScheduler } from './server/newsSchedulerService.ts';
 
 function buildAllowedOrigins(): Set<string> {
@@ -102,6 +103,7 @@ async function startServer() {
   }
 
   startBrawlStarsScheduler();
+  startMatchTrackerScheduler();
   startNewsScheduler();
 
   app.listen(port, '0.0.0.0', () => {

@@ -17,6 +17,12 @@ export type ApplicationStage =
 
 export type MatchFormat = 'MD3' | 'MD5' | 'MD7';
 
+export type TournamentStage = 'registration' | 'groups' | 'playoffs' | 'final' | 'completed';
+
+export type MatchStage = 'groups' | 'playoffs' | 'final' | 'standalone';
+
+export type AdditionalTiebreakerPolicy = 'none' | 'game_diff' | 'games_won' | 'manual';
+
 export const BLUEPRINT_LIMITS = {
   ID_REGEX: /^[a-zA-Z0-9_-]+$/,
   SLUG_REGEX: /^[a-z0-9-]+$/,
@@ -185,17 +191,100 @@ export interface ApplicationNote {
   updatedAt?: unknown;
 }
 
+export interface TournamentRules {
+  initialStage: 'groups' | 'knockout';
+  groupCount: number;
+  teamsPerGroup: number;
+  groupRoundFormat: 'single_round_robin';
+  groupMatchFormat: MatchFormat;
+  playoffMatchFormat: MatchFormat;
+  finalMatchFormat: MatchFormat;
+  winPoints: number;
+  lossPoints: number;
+  qualifiersPerGroup: number;
+  additionalTiebreaker: AdditionalTiebreakerPolicy;
+  resultMode: 'hybrid_tracker' | 'manual_only';
+  playoffSeedingMode: 'standard_2_groups' | 'custom_admin';
+}
+
+export interface TournamentParticipant {
+  teamId: string;
+  teamName: string;
+  playerTags?: string[];
+  groupName?: string;
+  seed?: number;
+}
+
+export interface TournamentStandingRow {
+  position: number;
+  teamId?: string;
+  team: string;
+  groupName?: string;
+  played?: number;
+  wins: number;
+  losses: number;
+  gamesWon?: number;
+  gamesLost?: number;
+  gameDiff?: number;
+  points: number;
+  qualified?: boolean;
+  tieStatus?: 'clear' | 'resolved_h2h' | 'resolved_wins' | 'resolved_extra' | 'unresolved';
+  tieNote?: string;
+}
+
+export interface TournamentGroupState {
+  name: string;
+  teamIds: string[];
+  standings: TournamentStandingRow[];
+  unresolvedTieTeamIds: string[];
+  manualTieBreakOrder?: string[];
+}
+
+export interface PlayoffBracketPairing {
+  slot: string;
+  label: string;
+  teamAKey: string;
+  teamBKey: string;
+  format?: MatchFormat;
+}
+
 export interface Tournament {
   id: string;
   name: string;
+  description?: string;
   organizer?: string;
-  format: 'MD3' | 'MD5' | 'MD7' | 'Pontos Corridos' | 'Chave Dupla';
+  format: 'MD3' | 'MD5' | 'MD7' | 'Pontos Corridos' | 'Chave Dupla' | 'Grupos + Playoffs';
   status: 'upcoming' | 'ongoing' | 'completed';
+  currentStage?: TournamentStage;
+  lockedStages?: string[];
   startDate?: unknown;
+  endDate?: unknown;
+  registrationOpen?: boolean;
   isPublic: boolean;
-  standings?: Array<{ position: number; team: string; points: number; wins: number; losses: number }>;
+  rules?: TournamentRules;
+  participants?: TournamentParticipant[];
+  groups?: TournamentGroupState[];
+  playoffBracketConfig?: PlayoffBracketPairing[];
+  standings?: TournamentStandingRow[];
+  championTeamId?: string;
+  championTeamName?: string;
+  groupStageClosedAt?: unknown;
+  playoffsGeneratedAt?: unknown;
   createdAt?: unknown;
   updatedAt?: unknown;
+}
+
+export interface MatchGame {
+  gameNumber: number;
+  winnerSide: 'teamA' | 'teamB';
+  mode?: string;
+  map?: string;
+  battleTime?: string;
+  battleId?: string;
+  source: 'auto_tracker' | 'admin_confirmed' | 'manual';
+  confirmedBy?: string;
+  teamABrawlers?: string[];
+  teamBBrawlers?: string[];
 }
 
 export interface Match {
@@ -205,12 +294,27 @@ export interface Match {
   teamId: string;
   teamName: string;
   opponentName: string;
+  teamAId?: string;
+  teamAName?: string;
+  teamBId?: string;
+  teamBName?: string;
+  stage?: MatchStage;
+  groupName?: string;
+  round?: number;
+  bracketSlot?: string;
   format: MatchFormat;
+  seriesBestOf?: number;
   scheduledAt: unknown;
   status: 'scheduled' | 'live_manual' | 'completed' | 'cancelled';
   nxfScore?: number;
   opponentScore?: number;
+  winnerTeamId?: string;
+  locked?: boolean;
+  resultSource?: 'manual' | 'auto_tracker' | 'hybrid';
+  confirmedBy?: string;
+  confirmedAt?: unknown;
   maps?: Array<{ mode: string; map: string; winner?: 'nxf' | 'opponent' }>;
+  games?: MatchGame[];
   lineupUids?: string[];
   isPublic: boolean;
   enteredBy: string;
@@ -366,11 +470,114 @@ export interface BackupJob {
 export interface PlayerStats {
   uid: string;
   brawlTag: string;
+  playerName?: string;
   trophies?: number;
   highestTrophies?: number;
   victories3v3?: number;
   soloVictories?: number;
   duoVictories?: number;
+  expLevel?: number;
+  clubName?: string;
+  brawlersCount?: number;
   syncStatus: 'ok' | 'pending_config' | 'error';
   lastSyncedAt?: unknown;
+}
+
+export interface BrawlerStatSummary {
+  brawlerName: string;
+  battles: number;
+  wins: number;
+  losses: number;
+  draws: number;
+  winRate: number;
+}
+
+export interface MapStatSummary {
+  map: string;
+  mode: string;
+  battles: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+}
+
+export interface ModeStatSummary {
+  mode: string;
+  battles: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+}
+
+export interface PlayerAnalytics {
+  uid: string;
+  displayName?: string;
+  brawlTag: string;
+  totalBattles: number;
+  wins: number;
+  losses: number;
+  draws: number;
+  winRate: number;
+  brawlerStats: BrawlerStatSummary[];
+  mapStats: MapStatSummary[];
+  modeStats: ModeStatSummary[];
+  lastBattleTime?: string | null;
+  updatedAt?: unknown;
+}
+
+export interface TeamAnalytics {
+  teamId: string;
+  teamName: string;
+  memberTags: string[];
+  totalBattles: number;
+  squadBattles: number;
+  wins: number;
+  losses: number;
+  draws: number;
+  winRate: number;
+  brawlerStats: BrawlerStatSummary[];
+  mapStats: MapStatSummary[];
+  modeStats: ModeStatSummary[];
+  updatedAt?: unknown;
+}
+
+export interface MatchTrackerCandidate {
+  id: string;
+  tournamentId: string;
+  tournamentName: string;
+  matchId: string;
+  teamAName: string;
+  teamBName: string;
+  battleId: string;
+  battleTime: string;
+  mode: string;
+  map: string;
+  suggestedWinnerSide: 'teamA' | 'teamB' | 'unknown';
+  matchedTeamATags: string[];
+  matchedTeamBTags: string[];
+  teamABrawlers: string[];
+  teamBBrawlers: string[];
+  reasons: string[];
+  status: 'pending_review' | 'approved' | 'rejected';
+  resolvedBy?: string;
+  resolvedAt?: unknown;
+  resolutionNotes?: string;
+  createdAt?: unknown;
+}
+
+export interface BrawlSyncLog {
+  id: string;
+  jobType: 'player_sync' | 'match_tracker';
+  status: 'ok' | 'partial' | 'error' | 'skipped';
+  triggeredBy: string;
+  syncedPlayers: number;
+  newBattles: number;
+  duplicateBattles: number;
+  autoMatchedGames?: number;
+  pendingConfirmations?: number;
+  errorCount: number;
+  httpStatus?: number | null;
+  errorMessage?: string | null;
+  durationMs: number;
+  createdAt?: unknown;
 }

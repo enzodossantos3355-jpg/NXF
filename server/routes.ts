@@ -22,9 +22,27 @@ import {
 } from './permissions.ts';
 import {
   getBrawlSyncStatus,
+  getCompetitiveAnalyticsSummary,
+  lookupBrawlPlayerByTag,
   syncBrawlStarsStats,
   testBrawlStarsApiConnection,
 } from './brawlStarsService.ts';
+import {
+  getMatchTrackerStatus,
+  resolveMatchTrackerCandidate,
+  runMatchTrackerCycle,
+} from './matchTrackerService.ts';
+import {
+  advanceTournamentStage,
+  configureTournament,
+  createConfiguredTournament,
+  generateTournamentGroupStage,
+  recalculateTournamentStandings,
+  recordTournamentMatchResult,
+  type PlayoffBracketPairing,
+  type TournamentParticipant,
+  type TournamentRules,
+} from './tournamentService.ts';
 import { publishDueScheduledNews } from './newsSchedulerService.ts';
 import {
   deleteMediaBlobIfAuthorized,
@@ -1324,11 +1342,12 @@ export function createApiRouter() {
   router.post(
     '/brawl/sync',
     requireAuth,
-    requireCapability((c) => c.isAnyAdmin || c.canAccessSystem),
+    requireCapability((c) => c.isAnyAdmin || c.canAccessSystem || c.canManageCompetitive),
     async (req: AuthenticatedRequest, res: Response) => {
       const result = await syncBrawlStarsStats({
         force: true,
         triggeredBy: req.authContext!.uid,
+        includeBattlelogs: true,
       });
 
       const { db } = getAdminServices();
@@ -1339,7 +1358,7 @@ export function createApiRouter() {
           action: 'SYNC_BRAWL_STARS',
           entityType: 'systemJobs',
           entityId: 'brawlStarsSync',
-          summary: `Sincronização manual Brawl Stars: ok=${result.ok}, atualizados=${result.syncedCount}, erros=${result.errorCount}.`,
+          summary: `Sincronização manual Brawl Stars: ok=${result.ok}, atualizados=${result.syncedCount}, novasBatalhas=${result.newBattlesCount ?? 0}, erros=${result.errorCount}.`,
           createdAt: FieldValue.serverTimestamp(),
         });
       }
@@ -1369,6 +1388,310 @@ export function createApiRouter() {
         });
       }
 
+      res.json(result);
+    }
+  );
+
+  router.get(
+    '/brawl/player/:tag',
+    requireAuth,
+    requireCapability((c) => c.isOfficialMember),
+    async (req: AuthenticatedRequest, res: Response) => {
+      const result = await lookupBrawlPlayerByTag(req.params.tag);
+      if (!result.ok) {
+        res.status(result.httpStatus === 404 ? 404 : result.httpStatus === 400 ? 400 : 502).json(result);
+        return;
+      }
+      res.json(result);
+    }
+  );
+
+  router.get(
+    '/brawl/analytics',
+    requireAuth,
+    requireCapability((c) => c.isOfficialMember),
+    async (_req: AuthenticatedRequest, res: Response) => {
+      const { db } = getAdminServices();
+      if (!db) {
+        res.status(503).json({ ok: false, error: 'Firebase Admin SDK indisponível.' });
+        return;
+      }
+      const summary = await getCompetitiveAnalyticsSummary(db);
+      res.json({ ok: true, ...summary });
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // NXF Match Tracker (Monitoramento Híbrido de Battlelogs & Fila de Confirmação)
+  // ---------------------------------------------------------------------------
+  router.get(
+    '/match-tracker/status',
+    requireAuth,
+    requireCapability((c) => c.canManageCompetitive || c.isAnyAdmin),
+    async (_req: AuthenticatedRequest, res: Response) => {
+      const { db } = getAdminServices();
+      if (!db) {
+        res.status(503).json({ ok: false, error: 'Firebase Admin SDK indisponível.' });
+        return;
+      }
+      const status = await getMatchTrackerStatus(db);
+      res.json({ ok: true, ...status });
+    }
+  );
+
+  router.post(
+    '/match-tracker/run',
+    requireAuth,
+    requireCapability((c) => c.canManageCompetitive || c.isAnyAdmin),
+    async (req: AuthenticatedRequest, res: Response) => {
+      const result = await runMatchTrackerCycle({
+        force: true,
+        triggeredBy: req.authContext!.uid,
+      });
+      res.json(result);
+    }
+  );
+
+  router.post(
+    '/match-tracker/candidates/:id/resolve',
+    requireAuth,
+    requireCapability((c) => c.canManageCompetitive || c.isAnyAdmin),
+    async (req: AuthenticatedRequest, res: Response) => {
+      const { db } = getAdminServices();
+      if (!db) {
+        res.status(503).json({ ok: false, error: 'Firebase Admin SDK indisponível.' });
+        return;
+      }
+      const body = (req.body || {}) as {
+        decision?: 'approve' | 'reject';
+        winnerSideOverride?: 'teamA' | 'teamB';
+        notes?: string;
+      };
+      if (body.decision !== 'approve' && body.decision !== 'reject') {
+        res.status(400).json({ ok: false, error: 'Informe decision: "approve" ou "reject".' });
+        return;
+      }
+      const result = await resolveMatchTrackerCandidate(
+        db,
+        {
+          uid: req.authContext!.uid,
+          displayName: req.authContext!.userDoc?.displayName || req.authContext!.uid,
+        },
+        {
+          candidateId: req.params.id,
+          decision: body.decision,
+          winnerSideOverride: body.winnerSideOverride,
+          notes: body.notes,
+        }
+      );
+      if (!result.ok) {
+        res.status(result.status).json({ ok: false, error: result.error });
+        return;
+      }
+      res.json(result);
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Sistema de Campeonatos, Fase de Grupos, Classificação e Playoffs NXF
+  // ---------------------------------------------------------------------------
+  router.post(
+    '/tournaments',
+    requireAuth,
+    requireCapability((c) => c.canManageCompetitive || c.isAnyAdmin),
+    async (req: AuthenticatedRequest, res: Response) => {
+      const { db } = getAdminServices();
+      if (!db) {
+        res.status(503).json({ ok: false, error: 'Firebase Admin SDK indisponível.' });
+        return;
+      }
+      const body = (req.body || {}) as {
+        name?: string;
+        description?: string;
+        organizer?: string;
+        startDateIso?: string;
+        endDateIso?: string;
+        isPublic?: boolean;
+        registrationOpen?: boolean;
+        rules?: Partial<TournamentRules>;
+        participants?: TournamentParticipant[];
+      };
+      const result = await createConfiguredTournament(
+        db,
+        {
+          uid: req.authContext!.uid,
+          displayName: req.authContext!.userDoc?.displayName || req.authContext!.uid,
+        },
+        body
+      );
+      if (!result.ok) {
+        res.status(result.status).json({ ok: false, error: result.error });
+        return;
+      }
+      res.status(201).json(result);
+    }
+  );
+
+  router.post(
+    '/tournaments/:id/configure',
+    requireAuth,
+    requireCapability((c) => c.canManageCompetitive || c.isAnyAdmin),
+    async (req: AuthenticatedRequest, res: Response) => {
+      const { db } = getAdminServices();
+      if (!db) {
+        res.status(503).json({ ok: false, error: 'Firebase Admin SDK indisponível.' });
+        return;
+      }
+      const body = (req.body || {}) as {
+        name?: string;
+        description?: string;
+        registrationOpen?: boolean;
+        isPublic?: boolean;
+        rules?: Partial<TournamentRules>;
+        participants?: TournamentParticipant[];
+        playoffBracketConfig?: PlayoffBracketPairing[];
+        manualTieBreakByGroup?: Record<string, string[]>;
+      };
+      const result = await configureTournament(
+        db,
+        {
+          uid: req.authContext!.uid,
+          displayName: req.authContext!.userDoc?.displayName || req.authContext!.uid,
+        },
+        req.params.id,
+        body
+      );
+      if (!result.ok) {
+        res.status(result.status).json({ ok: false, error: result.error });
+        return;
+      }
+      res.json(result);
+    }
+  );
+
+  router.post(
+    '/tournaments/:id/generate-groups',
+    requireAuth,
+    requireCapability((c) => c.canManageCompetitive || c.isAnyAdmin),
+    async (req: AuthenticatedRequest, res: Response) => {
+      const { db } = getAdminServices();
+      if (!db) {
+        res.status(503).json({ ok: false, error: 'Firebase Admin SDK indisponível.' });
+        return;
+      }
+      const body = (req.body || {}) as { scheduledStartIso?: string };
+      const result = await generateTournamentGroupStage(
+        db,
+        {
+          uid: req.authContext!.uid,
+          displayName: req.authContext!.userDoc?.displayName || req.authContext!.uid,
+        },
+        req.params.id,
+        { scheduledStartIso: body.scheduledStartIso }
+      );
+      if (!result.ok) {
+        res.status(result.status).json({ ok: false, error: result.error });
+        return;
+      }
+      res.json(result);
+    }
+  );
+
+  router.post(
+    '/tournaments/:id/recalculate-standings',
+    requireAuth,
+    requireCapability((c) => c.canManageCompetitive || c.isAnyAdmin),
+    async (req: AuthenticatedRequest, res: Response) => {
+      const { db } = getAdminServices();
+      if (!db) {
+        res.status(503).json({ ok: false, error: 'Firebase Admin SDK indisponível.' });
+        return;
+      }
+      const result = await recalculateTournamentStandings(db, req.params.id);
+      if (!result.ok) {
+        res.status(result.status).json({ ok: false, error: result.error });
+        return;
+      }
+      res.json(result);
+    }
+  );
+
+  router.post(
+    '/tournaments/:id/advance',
+    requireAuth,
+    requireCapability((c) => c.canManageCompetitive || c.isAnyAdmin),
+    async (req: AuthenticatedRequest, res: Response) => {
+      const { db } = getAdminServices();
+      if (!db) {
+        res.status(503).json({ ok: false, error: 'Firebase Admin SDK indisponível.' });
+        return;
+      }
+      const body = (req.body || {}) as {
+        playoffBracketConfig?: PlayoffBracketPairing[];
+        scheduledStartIso?: string;
+      };
+      const result = await advanceTournamentStage(
+        db,
+        {
+          uid: req.authContext!.uid,
+          displayName: req.authContext!.userDoc?.displayName || req.authContext!.uid,
+        },
+        req.params.id,
+        body
+      );
+      if (!result.ok) {
+        res.status(result.status).json({ ok: false, error: result.error });
+        return;
+      }
+      res.json(result);
+    }
+  );
+
+  router.post(
+    '/matches/:matchId/result',
+    requireAuth,
+    requireCapability((c) => c.canManageCompetitive || c.isAnyAdmin),
+    async (req: AuthenticatedRequest, res: Response) => {
+      const { db } = getAdminServices();
+      if (!db) {
+        res.status(503).json({ ok: false, error: 'Firebase Admin SDK indisponível.' });
+        return;
+      }
+      const body = (req.body || {}) as {
+        game?: {
+          winnerSide: 'teamA' | 'teamB';
+          mode?: string;
+          map?: string;
+          battleTime?: string;
+          battleId?: string;
+        };
+        teamAScore?: number;
+        teamBScore?: number;
+        finalize?: boolean;
+      };
+      const result = await recordTournamentMatchResult(
+        db,
+        {
+          uid: req.authContext!.uid,
+          displayName: req.authContext!.userDoc?.displayName || req.authContext!.uid,
+        },
+        {
+          matchId: req.params.matchId,
+          game: body.game
+            ? {
+                ...body.game,
+                source: 'manual',
+              }
+            : undefined,
+          teamAScore: body.teamAScore,
+          teamBScore: body.teamBScore,
+          finalize: body.finalize,
+        }
+      );
+      if (!result.ok) {
+        res.status(result.status).json({ ok: false, error: result.error });
+        return;
+      }
       res.json(result);
     }
   );

@@ -1,0 +1,122 @@
+name: Deploy Firestore Indexes (Manual Only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_project_id:
+        description: 'ID exato do projeto Firebase de destino ("nexo fury")'
+        required: true
+        type: string
+      confirmation:
+        description: 'Digite exatamente PUBLICAR-INDICES para confirmar a publicação somente dos índices'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-firestore-indexes
+  cancel-in-progress: false
+
+jobs:
+  deploy-firestore-indexes:
+    name: Publish Firestore Composite Indexes Only
+    runs-on: ubuntu-latest
+    environment: firebase-production
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate manual confirmation and authorized Firebase project
+        env:
+          INPUT_PROJECT_ID: ${{ inputs.target_project_id }}
+          AUTHORIZED_PROJECT_ID: ${{ vars.NXF_FIREBASE_PROJECT_ID }}
+          INPUT_CONFIRMATION: ${{ inputs.confirmation }}
+          WIF_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          WIF_SA_EMAIL: ${{ vars.GCP_FIREBASE_INDEXES_SA_EMAIL }}
+        run: |
+          set -euo pipefail
+
+          if [ "$INPUT_CONFIRMATION" != "PUBLICAR-INDICES" ]; then
+            echo "::error::Confirmação manual inválida. Digite exatamente PUBLICAR-INDICES para prosseguir."
+            exit 1
+          fi
+
+          if [ -z "$AUTHORIZED_PROJECT_ID" ]; then
+            echo "::error::A variável de repositório NXF_FIREBASE_PROJECT_ID não está configurada no GitHub."
+            exit 1
+          fi
+
+          if ! [[ "$AUTHORIZED_PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]]; then
+            echo "::error::Formato inválido em NXF_FIREBASE_PROJECT_ID."
+            exit 1
+          fi
+
+          if [ "$INPUT_PROJECT_ID" != "$AUTHORIZED_PROJECT_ID" ]; then
+            echo "::error::O ID do projeto informado não corresponde à variável autorizada NXF_FIREBASE_PROJECT_ID. Deploy abortado."
+            exit 1
+          fi
+
+          if [ -z "$WIF_PROVIDER" ] || [ -z "$WIF_SA_EMAIL" ]; then
+            echo "::error::Configure as variáveis GCP_WORKLOAD_IDENTITY_PROVIDER e GCP_FIREBASE_INDEXES_SA_EMAIL para autenticação OIDC (Workload Identity Federation)."
+            exit 1
+          fi
+
+          echo "Confirmação manual e projeto autorizado validados com sucesso."
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Validate firebase.json and firestore.indexes.json (20 expected indexes)
+        run: |
+          node -e "
+            const fs = require('node:fs');
+
+            const fbConfig = JSON.parse(fs.readFileSync('firebase.json', 'utf8'));
+            if (!fbConfig.firestore || fbConfig.firestore.indexes !== 'firestore.indexes.json') {
+              throw new Error('firebase.json não referencia firestore.indexes.json corretamente.');
+            }
+            if (fbConfig.firestore.database && fbConfig.firestore.database !== '(default)') {
+              throw new Error('firebase.json não está apontando para o banco (default).');
+            }
+
+            const raw = JSON.parse(fs.readFileSync('firestore.indexes.json', 'utf8'));
+            if (!Array.isArray(raw.indexes)) {
+              throw new Error('firestore.indexes.json não possui o array indexes.');
+            }
+            if (raw.indexes.length !== 20) {
+              throw new Error('Contagem inesperada de índices: esperado 20, encontrado ' + raw.indexes.length);
+            }
+            for (const [idx, item] of raw.indexes.entries()) {
+              if (!item.collectionGroup || !item.queryScope || !Array.isArray(item.fields) || item.fields.length < 2) {
+                throw new Error('Índice composto inválido na posição ' + idx);
+              }
+            }
+            console.log('Validação concluída: firebase.json (banco default) e 20 índices compostos válidos.');
+          "
+
+      - name: Install Firebase CLI
+        run: |
+          npm install -g firebase-tools
+          firebase --version
+
+      - name: Authenticate to Google Cloud via Workload Identity Federation (OIDC)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_FIREBASE_INDEXES_SA_EMAIL }}
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Deploy Firestore indexes ONLY
+        env:
+          PROJECT_ID: ${{ vars.NXF_FIREBASE_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          firebase deploy --only firestore:indexes --project "$PROJECT_ID" --non-interactive

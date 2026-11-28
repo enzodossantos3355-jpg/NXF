@@ -49,6 +49,57 @@ async function seedBaselineData(testEnv: RulesTestEnvironment) {
     await setDoc(doc(db, 'unknown_collection', 'doc1'), { secret: 'blocked' });
     await setDoc(doc(db, 'mediaBlobs', 'blob1'), { base64Data: 'AAAA' });
     await setDoc(doc(db, 'systemJobs', 'brawlStarsSync'), { running: false });
+    await setDoc(doc(db, 'playerAnalytics', 'player1'), {
+      uid: 'player1',
+      brawlTag: '#PLY001',
+      battlesAnalyzed: 10,
+      wins: 7,
+      losses: 3,
+      winRate: 70,
+      updatedAt: now,
+    });
+    await setDoc(doc(db, 'teamAnalytics', 'team-a'), {
+      teamId: 'team-a',
+      teamName: 'NXF Alpha',
+      battlesAnalyzed: 12,
+      wins: 9,
+      losses: 3,
+      winRate: 75,
+      updatedAt: now,
+    });
+    await setDoc(doc(db, 'brawlBattles', 'b_sample001'), {
+      battleId: 'b_sample001',
+      mode: 'gemGrab',
+      map: 'Hard Rock Mine',
+      createdAt: now,
+    });
+    await setDoc(doc(db, 'matchTrackerCandidates', 'cand_sample001'), {
+      battleId: 'b_sample001',
+      matchId: 'match-locked',
+      status: 'pending_review',
+      createdAt: now,
+    });
+    await setDoc(doc(db, 'brawlSyncLogs', 'log_sample001'), {
+      jobType: 'stats_sync',
+      status: 'ok',
+      createdAt: now,
+    });
+    await setDoc(doc(db, 'matches', 'match-locked'), {
+      teamId: 'team-a',
+      teamName: 'NXF Alpha',
+      opponentName: 'NXF Beta',
+      tournamentId: 't-locked',
+      stage: 'groups',
+      format: 'MD3',
+      scheduledAt: now,
+      status: 'completed',
+      nxfScore: 2,
+      opponentScore: 0,
+      locked: true,
+      isPublic: true,
+      createdAt: now,
+      updatedAt: now,
+    });
 
     // 1. Administrador Principal
     await setDoc(doc(db, 'users', 'primary1'), {
@@ -755,7 +806,51 @@ async function run() {
       })
     );
 
-    console.log('Todos os testes de regras do Firestore (7 perfis) passaram com sucesso.');
+    // =========================================================================
+    // 9. Novas coleções competitivas (Brawl Intelligence & Match Tracker) e trava de fase
+    // =========================================================================
+    // playerAnalytics: leitura pública; escrita bloqueada no client mesmo para primary_admin
+    await assertSucceeds(getDoc(doc(anonDb, 'playerAnalytics', 'player1')));
+    await assertSucceeds(getDoc(doc(candDb, 'playerAnalytics', 'player1')));
+    await assertFails(setDoc(doc(primaryDb, 'playerAnalytics', 'player1'), { winRate: 100 }));
+
+    // teamAnalytics & brawlBattles: apenas membros oficiais ativos; negado a visitantes e candidatos; escrita bloqueada
+    await assertFails(getDoc(doc(anonDb, 'teamAnalytics', 'team-a')));
+    await assertFails(getDoc(doc(candDb, 'teamAnalytics', 'team-a')));
+    await assertSucceeds(getDoc(doc(playerDb, 'teamAnalytics', 'team-a')));
+    await assertFails(setDoc(doc(primaryDb, 'teamAnalytics', 'team-a'), { winRate: 100 }));
+
+    await assertFails(getDoc(doc(anonDb, 'brawlBattles', 'b_sample001')));
+    await assertFails(getDoc(doc(candDb, 'brawlBattles', 'b_sample001')));
+    await assertSucceeds(getDoc(doc(playerDb, 'brawlBattles', 'b_sample001')));
+    await assertFails(setDoc(doc(primaryDb, 'brawlBattles', 'b_sample001'), { hacked: true }));
+
+    // matchTrackerCandidates: restrito a gestores competitivos/admins; negado a visitante/candidato/jogador; escrita bloqueada
+    await assertFails(getDoc(doc(anonDb, 'matchTrackerCandidates', 'cand_sample001')));
+    await assertFails(getDoc(doc(candDb, 'matchTrackerCandidates', 'cand_sample001')));
+    await assertFails(getDoc(doc(playerDb, 'matchTrackerCandidates', 'cand_sample001')));
+    await assertSucceeds(getDoc(doc(primaryDb, 'matchTrackerCandidates', 'cand_sample001')));
+    await assertFails(
+      updateDoc(doc(primaryDb, 'matchTrackerCandidates', 'cand_sample001'), { status: 'approved' })
+    );
+
+    // brawlSyncLogs: restrito a admins/sistema/competitivo; negado a visitante/candidato/jogador; escrita bloqueada
+    await assertFails(getDoc(doc(anonDb, 'brawlSyncLogs', 'log_sample001')));
+    await assertFails(getDoc(doc(playerDb, 'brawlSyncLogs', 'log_sample001')));
+    await assertSucceeds(getDoc(doc(delegatedSysDb, 'brawlSyncLogs', 'log_sample001')));
+    await assertSucceeds(getDoc(doc(primaryDb, 'brawlSyncLogs', 'log_sample001')));
+    await assertFails(setDoc(doc(primaryDb, 'brawlSyncLogs', 'log_sample001'), { status: 'tampered' }));
+
+    // Partida pertencente a fase encerrada e travada (locked == true): alteração bloqueada mesmo para primary_admin
+    await assertFails(
+      updateDoc(doc(primaryDb, 'matches', 'match-locked'), {
+        nxfScore: 0,
+        opponentScore: 2,
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    console.log('Todos os testes de regras do Firestore (7 perfis + coleções competitivas) passaram com sucesso.');
   } finally {
     await testEnv.cleanup();
   }

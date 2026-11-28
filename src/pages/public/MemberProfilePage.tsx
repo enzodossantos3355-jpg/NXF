@@ -1,16 +1,17 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { ArrowLeft, ExternalLink, Shield, Trophy } from 'lucide-react';
+import { ArrowLeft, BarChart3, ExternalLink, Shield, Trophy } from 'lucide-react';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { db } from '../../lib/firebase';
 import { EmptyState, LoadingSkeleton } from '../../components/common/StateViews';
 import { SafeImage } from '../../components/common/BrandMark';
-import type { PlayerStats, PublicProfile } from '../../types/nxf';
+import type { PlayerAnalytics, PlayerStats, PublicProfile } from '../../types/nxf';
 
 export function MemberProfilePage() {
   const { profileId } = useParams<{ profileId: string }>();
   const [profile, setProfile] = useState<PublicProfile | null>(null);
   const [stats, setStats] = useState<PlayerStats | null>(null);
+  const [analytics, setAnalytics] = useState<PlayerAnalytics | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -30,9 +31,17 @@ export function MemberProfilePage() {
       },
       () => {}
     );
+    const u3 = onSnapshot(
+      doc(db, 'playerAnalytics', profileId),
+      (snap) => {
+        setAnalytics(snap.exists() ? (snap.data() as PlayerAnalytics) : null);
+      },
+      () => {}
+    );
     return () => {
       u1();
       u2();
+      u3();
     };
   }, [profileId]);
 
@@ -97,13 +106,15 @@ export function MemberProfilePage() {
         /* Layouts Clássico e Competitivo */
         <div className="bg-[#15151A] border border-white/10 rounded-lg overflow-hidden">
           <div className="relative h-48 sm:h-60 bg-[#202027]">
-            {profile.bannerUrl && (
-              <img
+            {profile.bannerUrl ? (
+              <SafeImage
                 src={profile.bannerUrl}
                 alt={`Banner de ${profile.nickname}`}
-                referrerPolicy="no-referrer"
                 className="w-full h-full object-cover"
+                fallbackLabel={profile.nickname}
               />
+            ) : (
+              <div className="w-full h-full bg-gradient-to-br from-[#1B1B22] via-[#121217] to-[#260D12]" />
             )}
             <div className="absolute inset-0 bg-gradient-to-t from-[#15151A] via-[#15151A]/40 to-transparent" />
           </div>
@@ -139,18 +150,24 @@ export function MemberProfilePage() {
               <p className="text-sm text-[#A1A1AA] leading-relaxed max-w-3xl">{profile.bio}</p>
             )}
 
-            {layout === 'competitive' && (
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2 border-t border-white/8">
+            {(layout === 'competitive' || stats?.syncStatus === 'ok') && (
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 pt-2 border-t border-white/8">
                 <div className="bg-[#0D0D10] border border-white/8 rounded-md p-4">
                   <p className="text-xs text-[#A1A1AA]">Troféus Oficiais (API)</p>
                   <p className="font-mono-tabular text-2xl font-bold text-white mt-1">
-                    {stats?.syncStatus === 'ok' ? (stats.trophies ?? 0) : 'Aguardando sincronização'}
+                    {stats?.syncStatus === 'ok' ? (stats.trophies ?? 0).toLocaleString('pt-BR') : '—'}
                   </p>
                 </div>
                 <div className="bg-[#0D0D10] border border-white/8 rounded-md p-4">
                   <p className="text-xs text-[#A1A1AA]">Vitórias 3v3</p>
                   <p className="font-mono-tabular text-2xl font-bold text-white mt-1">
-                    {stats?.syncStatus === 'ok' ? (stats.victories3v3 ?? 0) : '—'}
+                    {stats?.syncStatus === 'ok' ? (stats.victories3v3 ?? 0).toLocaleString('pt-BR') : '—'}
+                  </p>
+                </div>
+                <div className="bg-[#0D0D10] border border-white/8 rounded-md p-4">
+                  <p className="text-xs text-[#A1A1AA]">Win Rate (Battlelog)</p>
+                  <p className="font-mono-tabular text-2xl font-bold text-white mt-1">
+                    {analytics && analytics.totalBattles > 0 ? `${analytics.winRate}%` : '—'}
                   </p>
                 </div>
                 <div className="bg-[#0D0D10] border border-white/8 rounded-md p-4">
@@ -185,10 +202,87 @@ export function MemberProfilePage() {
         </div>
       )}
 
+      {/* Análise Competitiva Real (Battlelogs Coletados) */}
+      {analytics && analytics.totalBattles > 0 && (
+        <section className="bg-[#15151A] border border-white/8 rounded-lg p-6 space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-white/8 pb-3">
+            <h2 className="font-display text-xl font-bold text-white flex items-center gap-2">
+              <BarChart3 className="w-4 h-4 text-[#EF3340]" />
+              Desempenho Recente no Brawl Stars
+            </h2>
+            <p className="text-xs font-mono-tabular text-[#A1A1AA]">
+              {analytics.totalBattles} batalha(s) · {analytics.wins}V / {analytics.losses}D · {analytics.winRate}% WR
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="space-y-2">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-[#A1A1AA]">
+                Brawlers mais utilizados
+              </h3>
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-[#71717A] border-b border-white/8">
+                    <th className="py-1.5 text-left font-medium">Brawler</th>
+                    <th className="py-1.5 text-right font-medium">Jogos</th>
+                    <th className="py-1.5 text-right font-medium">V/D</th>
+                    <th className="py-1.5 text-right font-medium">Win Rate</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {analytics.brawlerStats.slice(0, 6).map((b) => (
+                    <tr key={b.brawlerName} className="border-b border-white/5 last:border-none">
+                      <td className="py-2 font-medium text-white">{b.brawlerName}</td>
+                      <td className="py-2 text-right font-mono-tabular text-[#A1A1AA]">{b.battles}</td>
+                      <td className="py-2 text-right font-mono-tabular text-[#A1A1AA]">
+                        {b.wins}/{b.losses}
+                      </td>
+                      <td className="py-2 text-right font-mono-tabular font-semibold text-white">
+                        {b.winRate}%
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="space-y-2">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-[#A1A1AA]">
+                Modos mais jogados
+              </h3>
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-[#71717A] border-b border-white/8">
+                    <th className="py-1.5 text-left font-medium">Modo</th>
+                    <th className="py-1.5 text-right font-medium">Jogos</th>
+                    <th className="py-1.5 text-right font-medium">V/D</th>
+                    <th className="py-1.5 text-right font-medium">Win Rate</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {analytics.modeStats.slice(0, 6).map((m) => (
+                    <tr key={m.mode} className="border-b border-white/5 last:border-none">
+                      <td className="py-2 font-medium text-white capitalize">{m.mode}</td>
+                      <td className="py-2 text-right font-mono-tabular text-[#A1A1AA]">{m.battles}</td>
+                      <td className="py-2 text-right font-mono-tabular text-[#A1A1AA]">
+                        {m.wins}/{m.losses}
+                      </td>
+                      <td className="py-2 text-right font-mono-tabular font-semibold text-white">
+                        {m.winRate}%
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      )}
+
       <div className="bg-[#15151A] border border-white/8 rounded-lg p-5 flex items-center gap-3 text-xs text-[#A1A1AA]">
         <Trophy className="w-4 h-4 text-[#EF3340] shrink-0" />
         <span>
-          Estatísticas oficiais de Brawl Stars são atualizadas exclusivamente por sincronização segura de backend quando configurada no NXF System.
+          Estatísticas e históricos de Brawl Stars exibidos nesta página são coletados exclusivamente da API oficial via sincronização segura do backend NXF.
         </span>
       </div>
     </div>

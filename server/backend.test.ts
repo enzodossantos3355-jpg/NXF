@@ -13,10 +13,29 @@ import {
   type AuthDeps,
 } from './authMiddleware.ts';
 import {
+  computeBattleDedupId,
+  fetchBrawlApiWithRetry,
   getBrawlSyncStatus,
+  lookupBrawlPlayerByTag,
+  parseBattlelogItem,
   syncBrawlStarsStats,
   testBrawlStarsApiConnection,
 } from './brawlStarsService.ts';
+import {
+  evaluateBattleForMatches,
+  resolveMatchTrackerCandidate,
+  runMatchTrackerCycle,
+} from './matchTrackerService.ts';
+import {
+  advanceTournamentStage,
+  computeGroupStandings,
+  configureTournament,
+  createConfiguredTournament,
+  DEFAULT_NXF_TOURNAMENT_RULES,
+  generateTournamentGroupStage,
+  recordTournamentMatchResult,
+  type TournamentActor,
+} from './tournamentService.ts';
 import {
   clearMediaCache,
   deleteMediaBlobIfAuthorized,
@@ -1002,4 +1021,765 @@ test('Roster Service sincroniza users.teamIds e publicProfiles.teamIds atomicame
   const auditEntries = Array.from(store.entries()).filter(([k]) => k.startsWith('auditLogs/'));
   assert.equal(auditEntries.length, 3);
 });
+
+test('Brawl Stars Intelligence: deduplicação de battlelog, retry controlado (429/500 vs 403), lookup e analytics reais', async () => {
+  // 1. Deduplicação determinística entre perspectivas opostas da mesma batalha
+  const rawBattlePerspectiveA = {
+    battleTime: '20261127T180000.000Z',
+    event: { id: 15000001, mode: 'gemGrab', map: 'Hard Rock Mine' },
+    battle: {
+      mode: 'gemGrab',
+      type: 'friendly',
+      result: 'victory',
+      duration: 128,
+      starPlayer: { tag: '#A1', name: 'AlphaOne', brawler: { id: 16000000, name: 'SHELLY', power: 11, trophies: 900 } },
+      teams: [
+        [
+          { tag: '#A1', name: 'AlphaOne', brawler: { id: 16000000, name: 'SHELLY', power: 11, trophies: 900 } },
+          { tag: '#A2', name: 'AlphaTwo', brawler: { id: 16000001, name: 'COLT', power: 11, trophies: 880 } },
+          { tag: '#A3', name: 'AlphaThree', brawler: { id: 16000002, name: 'BULL', power: 11, trophies: 850 } },
+        ],
+        [
+          { tag: '#B1', name: 'BetaOne', brawler: { id: 16000003, name: 'BROCK', power: 11, trophies: 890 } },
+          { tag: '#B2', name: 'BetaTwo', brawler: { id: 16000004, name: 'RICO', power: 11, trophies: 870 } },
+          { tag: '#B3', name: 'BetaThree', brawler: { id: 16000005, name: 'SPIKE', power: 11, trophies: 910 } },
+        ],
+      ],
+    },
+  };
+  const rawBattlePerspectiveB = {
+    ...rawBattlePerspectiveA,
+    battle: {
+      ...rawBattlePerspectiveA.battle,
+      result: 'defeat',
+      teams: [rawBattlePerspectiveA.battle.teams[1], rawBattlePerspectiveA.battle.teams[0]],
+    },
+  };
+
+  const parsedA = parseBattlelogItem(rawBattlePerspectiveA, '#A1');
+  const parsedB = parseBattlelogItem(rawBattlePerspectiveB, '#B1');
+  assert(parsedA && parsedB);
+  assert.equal(parsedA.battleId, parsedB.battleId);
+  assert.equal(
+    parsedA.battleId,
+    computeBattleDedupId(parsedA.battleTime, parsedA.participantTags, parsedA.mode, parsedA.map)
+  );
+
+  // 2. Retry controlado: tenta novamente em 429 e 500, mas NÃO tenta novamente em 403/404
+  {
+    let attempts = 0;
+    const flakyFetch: typeof fetch = async () => {
+      attempts += 1;
+      if (attempts === 1) return new globalThis.Response('rate limit', { status: 429 });
+      if (attempts === 2) return new globalThis.Response('server error', { status: 500 });
+      return new globalThis.Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+    const res = await fetchBrawlApiWithRetry('https://api.brawlstars.com/v1/players/%23A1', 'secret', {
+      fetchImpl: flakyFetch,
+      sleepImpl: async () => {},
+      maxRetries: 3,
+    });
+    assert.equal(res.ok, true);
+    assert.equal(res.status, 200);
+    assert.equal(attempts, 3);
+  }
+  {
+    let attempts = 0;
+    const forbiddenFetch: typeof fetch = async () => {
+      attempts += 1;
+      return new globalThis.Response(JSON.stringify({ reason: 'accessDenied.invalidIp' }), { status: 403 });
+    };
+    const res = await fetchBrawlApiWithRetry('https://api.brawlstars.com/v1/players/%23A1', 'secret', {
+      fetchImpl: forbiddenFetch,
+      sleepImpl: async () => {},
+      maxRetries: 3,
+    });
+    assert.equal(res.ok, false);
+    assert.equal(res.status, 403);
+    assert.equal(attempts, 1);
+  }
+
+  // 3. Lookup oficial por Tag com topBrawlers
+  {
+    const lookup = await lookupBrawlPlayerByTag('2pp', {
+      token: 'supercell-secret',
+      fetchImpl: async (url) => {
+        assert.match(String(url), /\/players\/%232PP$/);
+        return new globalThis.Response(
+          JSON.stringify({
+            tag: '#2PP',
+            name: 'AlphaOne',
+            trophies: 62000,
+            highestTrophies: 64500,
+            '3vs3Victories': 9100,
+            soloVictories: 210,
+            duoVictories: 340,
+            club: { tag: '#CLB1', name: 'NXF Fury' },
+            brawlers: [
+              { id: 16000000, name: 'SHELLY', power: 11, rank: 35, trophies: 1050, highestTrophies: 1100 },
+              { id: 16000005, name: 'SPIKE', power: 11, rank: 34, trophies: 990, highestTrophies: 1020 },
+            ],
+          }),
+          { status: 200 }
+        );
+      },
+      sleepImpl: async () => {},
+    });
+    assert.equal(lookup.ok, true);
+    assert.equal(lookup.player?.tag, '#2PP');
+    assert.equal(lookup.player?.clubName, 'NXF Fury');
+    assert.equal(lookup.player?.brawlersCount, 2);
+    assert.equal(lookup.player?.topBrawlers[0]?.name, 'SHELLY');
+  }
+
+  // 4. Sync completo com includeBattlelogs=true persiste brawlBattles deduplicadas, playerAnalytics, teamAnalytics e brawlSyncLogs
+  {
+    const battleWithValidTags = {
+      ...rawBattlePerspectiveA,
+      battle: {
+        ...rawBattlePerspectiveA.battle,
+        teams: [
+          [
+            { tag: '#A101', name: 'AlphaOne', brawler: { id: 16000000, name: 'SHELLY', power: 11, trophies: 900 } },
+            { tag: '#A102', name: 'AlphaTwo', brawler: { id: 16000001, name: 'COLT', power: 11, trophies: 880 } },
+            { tag: '#A103', name: 'AlphaThree', brawler: { id: 16000002, name: 'BULL', power: 11, trophies: 850 } },
+          ],
+          [
+            { tag: '#B101', name: 'BetaOne', brawler: { id: 16000003, name: 'BROCK', power: 11, trophies: 890 } },
+            { tag: '#B102', name: 'BetaTwo', brawler: { id: 16000004, name: 'RICO', power: 11, trophies: 870 } },
+            { tag: '#B103', name: 'BetaThree', brawler: { id: 16000005, name: 'SPIKE', power: 11, trophies: 910 } },
+          ],
+        ],
+      },
+    };
+
+    const { db, store } = createMockFirestore({
+      'teams/team-alpha': { id: 'team-alpha', name: 'NXF Alpha', active: true },
+      'users/uA1': {
+        uid: 'uA1',
+        displayName: 'AlphaOne',
+        brawlTag: '#A101',
+        brawlTagStatus: 'approved',
+        status: 'active',
+        teamIds: ['team-alpha'],
+      },
+      'users/uA2': {
+        uid: 'uA2',
+        displayName: 'AlphaTwo',
+        brawlTag: '#A102',
+        brawlTagStatus: 'approved',
+        status: 'active',
+        teamIds: ['team-alpha'],
+      },
+      'teamMemberships/team-alpha_uA1': {
+        teamId: 'team-alpha',
+        uid: 'uA1',
+        nickname: 'AlphaOne',
+        roleInTeam: 'starter',
+        status: 'active',
+      },
+      'teamMemberships/team-alpha_uA2': {
+        teamId: 'team-alpha',
+        uid: 'uA2',
+        nickname: 'AlphaTwo',
+        roleInTeam: 'starter',
+        status: 'active',
+      },
+    });
+
+    const mockFetch: typeof fetch = async (url) => {
+      const s = String(url);
+      if (s.endsWith('/battlelog')) {
+        return new globalThis.Response(
+          JSON.stringify({ items: [battleWithValidTags] }),
+          { status: 200 }
+        );
+      }
+      return new globalThis.Response(
+        JSON.stringify({
+          name: s.includes('%23A101') ? 'AlphaOne' : 'AlphaTwo',
+          trophies: 60000,
+          highestTrophies: 61000,
+          '3vs3Victories': 8000,
+          soloVictories: 100,
+          duoVictories: 200,
+        }),
+        { status: 200 }
+      );
+    };
+
+    const res = await syncBrawlStarsStats(
+      { force: true, triggeredBy: 'admin1', includeBattlelogs: true },
+      { db, token: 'supercell-secret', fetchImpl: mockFetch, sleepImpl: async () => {} }
+    );
+    assert.equal(res.ok, true);
+    assert.equal(res.syncedCount, 2);
+    assert.equal(res.newBattlesCount, 1);
+    assert.equal(res.duplicateBattlesCount, 1);
+
+    // Exatamente 1 batalha deduplicada gravada em brawlBattles
+    const storedBattles = Array.from(store.entries()).filter(([k]) => k.startsWith('brawlBattles/'));
+    assert.equal(storedBattles.length, 1);
+
+    // playerAnalytics real gerado para uA1 e uA2
+    const analyticsA1 = store.get('playerAnalytics/uA1') as Record<string, unknown>;
+    assert(analyticsA1);
+    assert.equal(analyticsA1.totalBattles, 1);
+    assert.equal(analyticsA1.wins, 1);
+    assert.equal(analyticsA1.winRate, 100);
+    assert.equal((analyticsA1.brawlerStats as Array<{ brawlerName: string }>)[0]?.brawlerName, 'SHELLY');
+
+    // teamAnalytics real gerado para team-alpha
+    const teamAnalytics = store.get('teamAnalytics/team-alpha') as Record<string, unknown>;
+    assert(teamAnalytics);
+    assert.equal(teamAnalytics.totalBattles, 1);
+    assert.equal(teamAnalytics.wins, 1);
+    assert.equal(teamAnalytics.winRate, 100);
+
+    // Log de sincronização registrado em brawlSyncLogs
+    const syncLogs = Array.from(store.entries()).filter(([k]) => k.startsWith('brawlSyncLogs/'));
+    assert.equal(syncLogs.length, 1);
+    assert.equal(syncLogs[0][1].status, 'ok');
+  }
+});
+
+test('NXF Match Tracker: confirma batalha inequívoca, deduplica leituras, envia ambíguas para fila e atualiza classificação', async () => {
+  const actor: TournamentActor = { uid: 'admin1', displayName: 'AdminNXF' };
+  const scheduledAtMs = Date.parse('2026-11-27T18:00:00.000Z');
+
+  const { db, store } = createMockFirestore({
+    'teams/team-a': { id: 'team-a', name: 'NXF Alpha', active: true },
+    'teams/team-b': { id: 'team-b', name: 'NXF Beta', active: true },
+    'users/uA1': { uid: 'uA1', displayName: 'A1', brawlTag: '#A101', brawlTagStatus: 'approved', status: 'active' },
+    'users/uA2': { uid: 'uA2', displayName: 'A2', brawlTag: '#A102', brawlTagStatus: 'approved', status: 'active' },
+    'users/uA3': { uid: 'uA3', displayName: 'A3', brawlTag: '#A103', brawlTagStatus: 'approved', status: 'active' },
+    'users/uB1': { uid: 'uB1', displayName: 'B1', brawlTag: '#B101', brawlTagStatus: 'approved', status: 'active' },
+    'users/uB2': { uid: 'uB2', displayName: 'B2', brawlTag: '#B102', brawlTagStatus: 'approved', status: 'active' },
+    'users/uB3': { uid: 'uB3', displayName: 'B3', brawlTag: '#B103', brawlTagStatus: 'approved', status: 'active' },
+    'tournaments/t1': {
+      name: 'Copa NXF Tracker',
+      status: 'ongoing',
+      currentStage: 'groups',
+      rules: DEFAULT_NXF_TOURNAMENT_RULES,
+      participants: [
+        { teamId: 'team-a', teamName: 'NXF Alpha', playerTags: ['#A101', '#A102', '#A103'] },
+        { teamId: 'team-b', teamName: 'NXF Beta', playerTags: ['#B101', '#B102', '#B103'] },
+      ],
+      groups: [
+        { name: 'A', teamIds: ['team-a', 'team-b'], standings: [], unresolvedTieTeamIds: [] },
+      ],
+    },
+    'matches/m1': {
+      tournamentId: 't1',
+      tournamentName: 'Copa NXF Tracker',
+      stage: 'groups',
+      groupName: 'A',
+      round: 1,
+      format: 'MD3',
+      seriesBestOf: 3,
+      teamId: 'team-a',
+      teamName: 'NXF Alpha',
+      teamAId: 'team-a',
+      teamBId: 'team-b',
+      opponentName: 'NXF Beta',
+      scheduledAt: Timestamp.fromMillis(scheduledAtMs),
+      status: 'scheduled',
+      nxfScore: 0,
+      opponentScore: 0,
+      games: [],
+      locked: false,
+      isPublic: true,
+    },
+  });
+
+  // 1. Batalha inequívoca #1 (3v3 completo, todos os 6 jogadores verificados em lados opostos -> auto_confirm)
+  const cleanGame1 = {
+    battleTime: '20261127T180500.000Z',
+    event: { id: 1, mode: 'gemGrab', map: 'Hard Rock Mine' },
+    battle: {
+      mode: 'gemGrab',
+      type: 'friendly',
+      result: 'victory',
+      teams: [
+        [
+          { tag: '#A101', name: 'A1', brawler: { name: 'SHELLY' } },
+          { tag: '#A102', name: 'A2', brawler: { name: 'COLT' } },
+          { tag: '#A103', name: 'A3', brawler: { name: 'SPIKE' } },
+        ],
+        [
+          { tag: '#B101', name: 'B1', brawler: { name: 'BROCK' } },
+          { tag: '#B102', name: 'B2', brawler: { name: 'RICO' } },
+          { tag: '#B103', name: 'B3', brawler: { name: 'PIPER' } },
+        ],
+      ],
+    },
+  };
+
+  // 2. Batalha ambígua #2 (cobertura parcial de elenco: apenas 1 jogador conhecido do lado B -> pending_review)
+  const ambiguousGame2 = {
+    battleTime: '20261127T181200.000Z',
+    event: { id: 2, mode: 'brawlBall', map: 'Backyard Bowl' },
+    battle: {
+      mode: 'brawlBall',
+      type: 'friendly',
+      result: 'victory',
+      teams: [
+        [
+          { tag: '#A101', name: 'A1', brawler: { name: 'MAX' } },
+          { tag: '#A102', name: 'A2', brawler: { name: 'GENE' } },
+          { tag: '#A103', name: 'A3', brawler: { name: 'SANDY' } },
+        ],
+        [
+          { tag: '#B101', name: 'B1', brawler: { name: 'BYRON' } },
+          { tag: '#RAND1', name: 'Sub1', brawler: { name: 'GUS' } },
+          { tag: '#RAND2', name: 'Sub2', brawler: { name: 'MELODIE' } },
+        ],
+      ],
+    },
+  };
+
+  // Também testa evaluateBattleForMatches diretamente em empate (draw -> pending_review, nunca auto_confirm)
+  const drawBattle = parseBattlelogItem(
+    {
+      ...cleanGame1,
+      battleTime: '20261127T182000.000Z',
+      battle: { ...cleanGame1.battle, result: 'draw' },
+    },
+    '#A101'
+  );
+  assert(drawBattle);
+  const drawEval = evaluateBattleForMatches(drawBattle, [
+    {
+      matchId: 'm1',
+      tournamentId: 't1',
+      tournamentName: 'Copa NXF Tracker',
+      match: store.get('matches/m1') as never,
+      scheduledAtMs,
+      teamAId: 'team-a',
+      teamAName: 'NXF Alpha',
+      teamBId: 'team-b',
+      teamBName: 'NXF Beta',
+      teamATags: ['#A101', '#A102', '#A103'],
+      teamBTags: ['#B101', '#B102', '#B103'],
+    },
+  ]);
+  assert.equal(drawEval.disposition, 'pending_review');
+  assert(drawEval.reasons.some((r) => /empatada|draw/i.test(r)));
+
+  // Executa ciclo do Match Tracker (lê battlelog de vários jogadores com as mesmas batalhas para testar deduplicação)
+  const trackerMockFetch: typeof fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('%23A101') || u.includes('%23A102')) {
+      return new globalThis.Response(
+        JSON.stringify({ items: [cleanGame1, ambiguousGame2] }),
+        { status: 200 }
+      );
+    }
+    return new globalThis.Response(JSON.stringify({ items: [] }), { status: 200 });
+  };
+
+  const cycleRes = await runMatchTrackerCycle(
+    { force: true, triggeredBy: 'admin1' },
+    {
+      db,
+      token: 'supercell-secret',
+      fetchImpl: trackerMockFetch,
+      sleepImpl: async () => {},
+      nowMs: () => scheduledAtMs + 20 * 60_000,
+    }
+  );
+  assert.equal(cycleRes.ok, true);
+  assert.equal(cycleRes.autoRegisteredGames, 1);
+  assert.equal(cycleRes.pendingConfirmations, 1);
+
+  // Partida m1 avançou exatamente para 1 x 0 (não duplicou ao ler A2!) e ainda está live_manual (MD3 precisa de 2)
+  const matchAfterCycle = store.get('matches/m1') as Record<string, unknown>;
+  assert.equal(matchAfterCycle.nxfScore, 1);
+  assert.equal(matchAfterCycle.opponentScore, 0);
+  assert.equal(matchAfterCycle.status, 'live_manual');
+
+  // Fila de confirmação administrativa contém exatamente 1 candidato pendente (a batalha ambígua)
+  const candidates = Array.from(store.entries()).filter(([k]) =>
+    k.startsWith('matchTrackerCandidates/')
+  );
+  assert.equal(candidates.length, 1);
+  const [candKey, candData] = candidates[0];
+  const candidateId = candKey.split('/')[1];
+  assert.equal(candData.status, 'pending_review');
+  assert.equal(candData.matchId, 'm1');
+  assert((candData.reasons as string[]).length > 0);
+
+  // Admin aprova a batalha ambígua -> placar vai para 2 x 0 -> série MD3 encerra -> tabela de grupos atualiza com 3 pts para NXF Alpha!
+  const approveRes = await resolveMatchTrackerCandidate(db, actor, {
+    candidateId,
+    decision: 'approve',
+    notes: 'Substitutos autorizados pela organização.',
+  });
+  assert.equal(approveRes.ok, true);
+  assert.equal(store.get('matches/m1')?.nxfScore, 2);
+  assert.equal(store.get('matches/m1')?.opponentScore, 0);
+  assert.equal(store.get('matches/m1')?.status, 'completed');
+  assert.equal(store.get('matches/m1')?.winnerTeamId, 'team-a');
+  assert.equal(store.get('matches/m1')?.resultSource, 'hybrid');
+
+  // Verifica recálculo automático da classificação do Grupo A
+  const groups = (store.get('tournaments/t1')?.groups || []) as Array<{
+    name: string;
+    standings: Array<{ teamId: string; points: number; wins: number; losses: number }>;
+  }>;
+  assert.equal(groups[0].standings[0].teamId, 'team-a');
+  assert.equal(groups[0].standings[0].points, 3);
+  assert.equal(groups[0].standings[0].wins, 1);
+  assert.equal(groups[0].standings[1].teamId, 'team-b');
+  assert.equal(groups[0].standings[1].points, 0);
+});
+
+test('Tournament Engine: grupos MD3, desempate (Pts -> H2H -> Vitórias -> Empate persistente), bloqueio de fase, playoffs MD5 e >2 grupos', async () => {
+  const actor: TournamentActor = { uid: 'admin1', displayName: 'AdminNXF' };
+  const sampleTs = Timestamp.now();
+
+  // 1. Teste unitário puro de computeGroupStandings:
+  //    (a) Confronto direto (H2H) desempata 2 equipes com mesma pontuação
+  {
+    const h2hRes = computeGroupStandings(
+      'A',
+      [
+        { teamId: 't1', teamName: 'Alpha' },
+        { teamId: 't2', teamName: 'Beta' },
+        { teamId: 't3', teamName: 'Gamma' },
+      ],
+      [
+        {
+          id: 'm1',
+          stage: 'groups',
+          groupName: 'A',
+          format: 'MD3',
+          teamId: 't1',
+          teamName: 'Alpha',
+          teamAId: 't1',
+          teamBId: 't2',
+          opponentName: 'Beta',
+          status: 'completed',
+          nxfScore: 1,
+          opponentScore: 2,
+          winnerTeamId: 't2',
+          scheduledAt: sampleTs,
+          isPublic: true,
+          enteredBy: 'admin1',
+        },
+        {
+          id: 'm2',
+          stage: 'groups',
+          groupName: 'A',
+          format: 'MD3',
+          teamId: 't1',
+          teamName: 'Alpha',
+          teamAId: 't1',
+          teamBId: 't3',
+          opponentName: 'Gamma',
+          status: 'completed',
+          nxfScore: 2,
+          opponentScore: 0,
+          winnerTeamId: 't1',
+          scheduledAt: sampleTs,
+          isPublic: true,
+          enteredBy: 'admin1',
+        },
+        {
+          id: 'm3',
+          stage: 'groups',
+          groupName: 'A',
+          format: 'MD3',
+          teamId: 't2',
+          teamName: 'Beta',
+          teamAId: 't2',
+          teamBId: 't3',
+          opponentName: 'Gamma',
+          status: 'completed',
+          nxfScore: 2,
+          opponentScore: 1,
+          winnerTeamId: 't2',
+          scheduledAt: sampleTs,
+          isPublic: true,
+          enteredBy: 'admin1',
+        },
+      ],
+      DEFAULT_NXF_TOURNAMENT_RULES
+    );
+    assert.equal(h2hRes.unresolvedTieTeamIds.length, 0);
+    assert.equal(h2hRes.standings[0].teamId, 't2'); // 6 pts
+    assert.equal(h2hRes.standings[1].teamId, 't1'); // 3 pts
+    assert.equal(h2hRes.standings[2].teamId, 't3'); // 0 pts
+  }
+
+  //    (b) Empate triplo circular perfeito (A>B, B>C, C>A, todos 2x1 -> 3 pts, H2H 1V/1D, 1 vitória)
+  //        NÃO classifica arbitrariamente quando additionalTiebreaker = 'none'
+  {
+    const circularRes = computeGroupStandings(
+      'A',
+      [
+        { teamId: 't1', teamName: 'Alpha' },
+        { teamId: 't2', teamName: 'Beta' },
+        { teamId: 't3', teamName: 'Gamma' },
+      ],
+      [
+        {
+          id: 'c1',
+          stage: 'groups',
+          groupName: 'A',
+          format: 'MD3',
+          teamId: 't1',
+          teamName: 'Alpha',
+          teamAId: 't1',
+          teamBId: 't2',
+          opponentName: 'Beta',
+          status: 'completed',
+          nxfScore: 2,
+          opponentScore: 1,
+          winnerTeamId: 't1',
+          scheduledAt: sampleTs,
+          isPublic: true,
+          enteredBy: 'admin1',
+        },
+        {
+          id: 'c2',
+          stage: 'groups',
+          groupName: 'A',
+          format: 'MD3',
+          teamId: 't2',
+          teamName: 'Beta',
+          teamAId: 't2',
+          teamBId: 't3',
+          opponentName: 'Gamma',
+          status: 'completed',
+          nxfScore: 2,
+          opponentScore: 1,
+          winnerTeamId: 't2',
+          scheduledAt: sampleTs,
+          isPublic: true,
+          enteredBy: 'admin1',
+        },
+        {
+          id: 'c3',
+          stage: 'groups',
+          groupName: 'A',
+          format: 'MD3',
+          teamId: 't3',
+          teamName: 'Gamma',
+          teamAId: 't3',
+          teamBId: 't1',
+          opponentName: 'Alpha',
+          status: 'completed',
+          nxfScore: 2,
+          opponentScore: 1,
+          winnerTeamId: 't3',
+          scheduledAt: sampleTs,
+          isPublic: true,
+          enteredBy: 'admin1',
+        },
+      ],
+      { ...DEFAULT_NXF_TOURNAMENT_RULES, additionalTiebreaker: 'none' }
+    );
+    assert.equal(circularRes.unresolvedTieTeamIds.length, 3);
+    assert.equal(circularRes.standings.every((r) => r.tieStatus === 'unresolved'), true);
+    assert.equal(circularRes.standings.some((r) => r.qualified), false);
+  }
+
+  // 2. Fluxo completo de campeonato NXF padrão (2 grupos × 4 equipes -> 12 jogos MD3 -> empate bloqueado -> resolução manual -> lock -> SF1/SF2 MD5 -> FINAL MD5 -> Campeão)
+  {
+    const { db, store } = createMockFirestore();
+    const participants = [
+      { teamId: 'a1', teamName: 'Alpha 1', groupName: 'A', playerTags: [] },
+      { teamId: 'a2', teamName: 'Alpha 2', groupName: 'A', playerTags: [] },
+      { teamId: 'a3', teamName: 'Alpha 3', groupName: 'A', playerTags: [] },
+      { teamId: 'a4', teamName: 'Alpha 4', groupName: 'A', playerTags: [] },
+      { teamId: 'b1', teamName: 'Beta 1', groupName: 'B', playerTags: [] },
+      { teamId: 'b2', teamName: 'Beta 2', groupName: 'B', playerTags: [] },
+      { teamId: 'b3', teamName: 'Beta 3', groupName: 'B', playerTags: [] },
+      { teamId: 'b4', teamName: 'Beta 4', groupName: 'B', playerTags: [] },
+    ];
+
+    const created = await createConfiguredTournament(db, actor, {
+      name: 'NXF Major Season 1',
+      participants,
+    });
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+    const tid = created.id;
+
+    // Verifica padrão configurável NXF
+    assert.equal(created.rules.groupCount, 2);
+    assert.equal(created.rules.teamsPerGroup, 4);
+    assert.equal(created.rules.groupMatchFormat, 'MD3');
+    assert.equal(created.rules.playoffMatchFormat, 'MD5');
+    assert.equal(created.rules.winPoints, 3);
+    assert.equal(created.rules.lossPoints, 0);
+    assert.equal(created.rules.qualifiersPerGroup, 2);
+
+    const gen = await generateTournamentGroupStage(db, actor, tid);
+    assert.equal(gen.ok, true);
+    if (!gen.ok) return;
+    assert.equal(gen.groupsCount, 2);
+    assert.equal(gen.matchesCreated, 12); // 6 confrontos por grupo em turno único
+
+    // Tentar avançar antes de concluir todos os confrontos -> bloqueado (409)
+    const prematureAdvance = await advanceTournamentStage(db, actor, tid);
+    assert.equal(prematureAdvance.ok, false);
+    if (!prematureAdvance.ok) assert.equal(prematureAdvance.status, 409);
+
+    // Preenche resultados:
+    // Grupo A: a1 vence todos (9 pts), e a2/a3/a4 criam empate triplo circular (3 pts cada, tudo 2x1)!
+    // Grupo B: b1 (9 pts), b2 (6 pts), b3 (3 pts), b4 (0 pts) — sem empate.
+    const groupMatches: Array<Record<string, unknown> & { id: string }> = Array.from(store.entries())
+      .filter(([k, v]) => k.startsWith('matches/') && v.tournamentId === tid && v.stage === 'groups')
+      .map(([k, v]) => ({ ...(v as Record<string, unknown>), id: k.split('/')[1] }));
+    assert.equal(groupMatches.length, 12);
+
+    const winnerForPair = (a: string, b: string): string => {
+      const set = new Set([a, b]);
+      // Grupo A
+      if (set.has('a1')) return 'a1';
+      if (set.has('a2') && set.has('a3')) return 'a2';
+      if (set.has('a3') && set.has('a4')) return 'a3';
+      if (set.has('a4') && set.has('a2')) return 'a4';
+      // Grupo B (ordem estrita b1 > b2 > b3 > b4)
+      return a < b ? a : b;
+    };
+
+    for (const m of groupMatches) {
+      const teamAId = String(m.teamAId);
+      const teamBId = String(m.teamBId);
+      const winner = winnerForPair(teamAId, teamBId);
+      const res = await recordTournamentMatchResult(db, actor, {
+        matchId: m.id,
+        teamAScore: winner === teamAId ? 2 : 1,
+        teamBScore: winner === teamBId ? 2 : 1,
+        finalize: true,
+      });
+      assert.equal(res.ok, true);
+    }
+
+    // Todos os 12 confrontos foram concluídos, MAS há empate triplo persistente no Grupo A -> avanço BLOQUEADO (409)!
+    const blockedByTie = await advanceTournamentStage(db, actor, tid);
+    assert.equal(blockedByTie.ok, false);
+    if (!blockedByTie.ok) {
+      assert.equal(blockedByTie.status, 409);
+      assert.match(blockedByTie.error, /empate não resolvido/i);
+    }
+
+    // Admin define ordem manual explícita para o Grupo A (a1, a3, a2, a4) -> resolve empate
+    const resolveTie = await configureTournament(db, actor, tid, {
+      manualTieBreakByGroup: { A: ['a1', 'a3', 'a2', 'a4'] },
+    });
+    assert.equal(resolveTie.ok, true);
+
+    // Agora avança para Playoffs -> trava grupos e cria SF1 (1º A × 2º B = a1 × b2) e SF2 (1º B × 2º A = b1 × a3) em MD5!
+    const toPlayoffs = await advanceTournamentStage(db, actor, tid);
+    assert.equal(toPlayoffs.ok, true);
+    if (!toPlayoffs.ok) return;
+    assert.equal(toPlayoffs.nextStage, 'playoffs');
+    assert.equal(toPlayoffs.createdMatchesCount, 2);
+
+    // Fase de grupos travada: tentar alterar qualquer partida de grupo deve falhar com 409
+    const editLocked = await recordTournamentMatchResult(db, actor, {
+      matchId: groupMatches[0].id,
+      teamAScore: 0,
+      teamBScore: 2,
+      finalize: true,
+    });
+    assert.equal(editLocked.ok, false);
+    if (!editLocked.ok) assert.equal(editLocked.status, 409);
+
+    const playoffMatches: Array<Record<string, unknown> & { id: string }> = Array.from(store.entries())
+      .filter(([k, v]) => k.startsWith('matches/') && v.tournamentId === tid && v.stage === 'playoffs')
+      .map(([k, v]) => ({ ...(v as Record<string, unknown>), id: k.split('/')[1] }));
+    assert.equal(playoffMatches.length, 2);
+    const sf1 = playoffMatches.find((m) => m.bracketSlot === 'SF1')!;
+    const sf2 = playoffMatches.find((m) => m.bracketSlot === 'SF2')!;
+    assert.equal(sf1.format, 'MD5');
+    assert.equal(sf1.teamAId, 'a1');
+    assert.equal(sf1.teamBId, 'b2');
+    assert.equal(sf2.format, 'MD5');
+    assert.equal(sf2.teamAId, 'b1');
+    assert.equal(sf2.teamBId, 'a3');
+
+    // Conclui SF1 (a1 vence 3x1) e SF2 (b1 vence 3x2) -> avança para Grand Final em MD5
+    await recordTournamentMatchResult(db, actor, { matchId: sf1.id, teamAScore: 3, teamBScore: 1, finalize: true });
+    await recordTournamentMatchResult(db, actor, { matchId: sf2.id, teamAScore: 3, teamBScore: 2, finalize: true });
+
+    const toFinal = await advanceTournamentStage(db, actor, tid);
+    assert.equal(toFinal.ok, true);
+    if (!toFinal.ok) return;
+    assert.equal(toFinal.nextStage, 'final');
+    assert.equal(toFinal.createdMatchesCount, 1);
+
+    const finalMatch: Record<string, unknown> & { id: string } = Array.from(store.entries())
+      .filter(([k, v]) => k.startsWith('matches/') && v.tournamentId === tid && v.stage === 'final')
+      .map(([k, v]) => ({ ...(v as Record<string, unknown>), id: k.split('/')[1] }))[0];
+    assert.equal(finalMatch.format, 'MD5');
+    assert.equal(finalMatch.teamAId, 'a1');
+    assert.equal(finalMatch.teamBId, 'b1');
+
+    // Conclui Grande Final (a1 vence 3x0) -> encerra torneio e coroa campeã Alpha 1
+    await recordTournamentMatchResult(db, actor, { matchId: finalMatch.id, teamAScore: 3, teamBScore: 0, finalize: true });
+    const complete = await advanceTournamentStage(db, actor, tid);
+    assert.equal(complete.ok, true);
+    if (!complete.ok) return;
+    assert.equal(complete.nextStage, 'completed');
+    assert.equal(complete.championTeamName, 'Alpha 1');
+    assert.equal(store.get(`tournaments/${tid}`)?.status, 'completed');
+  }
+
+  // 3. Mais de 2 grupos (3 grupos × 2 equipes): exige chaveamento administrativo explícito antes de gerar playoffs
+  {
+    const { db, store } = createMockFirestore();
+    const created3 = await createConfiguredTournament(db, actor, {
+      name: 'NXF Tri-Group Cup',
+      rules: { groupCount: 3, teamsPerGroup: 2, qualifiersPerGroup: 2 },
+      participants: [
+        { teamId: 'g1a', teamName: 'G1A', groupName: 'A', playerTags: [] },
+        { teamId: 'g1b', teamName: 'G1B', groupName: 'A', playerTags: [] },
+        { teamId: 'g2a', teamName: 'G2A', groupName: 'B', playerTags: [] },
+        { teamId: 'g2b', teamName: 'G2B', groupName: 'B', playerTags: [] },
+        { teamId: 'g3a', teamName: 'G3A', groupName: 'C', playerTags: [] },
+        { teamId: 'g3b', teamName: 'G3B', groupName: 'C', playerTags: [] },
+      ],
+    });
+    assert.equal(created3.ok, true);
+    if (!created3.ok) return;
+    const tid3 = created3.id;
+
+    const gen3 = await generateTournamentGroupStage(db, actor, tid3);
+    assert.equal(gen3.ok, true);
+
+    const matches3 = Array.from(store.entries())
+      .filter(([k, v]) => k.startsWith('matches/') && v.tournamentId === tid3 && v.stage === 'groups')
+      .map(([k]) => k.split('/')[1]);
+    for (const mId of matches3) {
+      await recordTournamentMatchResult(db, actor, { matchId: mId, teamAScore: 2, teamBScore: 0, finalize: true });
+    }
+
+    // Sem definição administrativa -> bloqueado com 400
+    const missingBracket = await advanceTournamentStage(db, actor, tid3);
+    assert.equal(missingBracket.ok, false);
+    if (!missingBracket.ok) {
+      assert.equal(missingBracket.status, 400);
+      assert.match(missingBracket.error, /chaveamento administrativo/i);
+    }
+
+    // Com playoffBracketConfig explícito -> gera playoffs MD5 corretamente
+    const explicitPlayoffs = await advanceTournamentStage(db, actor, tid3, {
+      playoffBracketConfig: [
+        { slot: 'QF1', label: 'Quartas 1', teamAKey: 'A:1', teamBKey: 'C:2' },
+        { slot: 'QF2', label: 'Quartas 2', teamAKey: 'B:1', teamBKey: 'A:2' },
+      ],
+    });
+    assert.equal(explicitPlayoffs.ok, true);
+    if (explicitPlayoffs.ok) {
+      assert.equal(explicitPlayoffs.nextStage, 'playoffs');
+      assert.equal(explicitPlayoffs.createdMatchesCount, 2);
+    }
+  }
+});
+
 

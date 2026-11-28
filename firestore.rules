@@ -258,14 +258,33 @@ service cloud.firestore {
 
     function isValidTournament(data) {
       return data.keys().hasAll(['name', 'format', 'status', 'isPublic', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['name', 'organizer', 'format', 'status', 'startDate', 'isPublic', 'standings', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'name', 'description', 'organizer', 'format', 'status', 'currentStage',
+          'lockedStages', 'startDate', 'endDate', 'registrationOpen', 'isPublic',
+          'rules', 'participants', 'groups', 'playoffBracketConfig', 'standings',
+          'championTeamId', 'championTeamName', 'groupStageClosedAt', 'playoffsGeneratedAt',
+          'createdAt', 'updatedAt'
+        ])
         && isNonEmptyString(data.name, 3, 100)
+        && isOptionalString(data, 'description', 1000)
         && isOptionalString(data, 'organizer', 80)
-        && data.format in ['MD3', 'MD5', 'MD7', 'Pontos Corridos', 'Chave Dupla']
+        && data.format in ['MD3', 'MD5', 'MD7', 'Pontos Corridos', 'Chave Dupla', 'Grupos + Playoffs']
         && data.status in ['upcoming', 'ongoing', 'completed']
+        && (!('currentStage' in data) || data.currentStage in ['registration', 'groups', 'playoffs', 'final', 'completed'])
+        && (!('lockedStages' in data) || (data.lockedStages is list && data.lockedStages.size() <= 6))
         && (!('startDate' in data) || data.startDate is timestamp)
+        && (!('endDate' in data) || data.endDate is timestamp)
+        && (!('registrationOpen' in data) || data.registrationOpen is bool)
         && data.isPublic is bool
-        && (!('standings' in data) || (data.standings is list && data.standings.size() <= 32))
+        && (!('rules' in data) || data.rules is map)
+        && (!('participants' in data) || (data.participants is list && data.participants.size() <= 64))
+        && (!('groups' in data) || (data.groups is list && data.groups.size() <= 8))
+        && (!('playoffBracketConfig' in data) || (data.playoffBracketConfig is list && data.playoffBracketConfig.size() <= 16))
+        && (!('standings' in data) || (data.standings is list && data.standings.size() <= 64))
+        && isOptionalString(data, 'championTeamId', 128)
+        && isOptionalString(data, 'championTeamName', 60)
+        && (!('groupStageClosedAt' in data) || data.groupStageClosedAt is timestamp)
+        && (!('playoffsGeneratedAt' in data) || data.playoffsGeneratedAt is timestamp)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -274,20 +293,38 @@ service cloud.firestore {
       return data.keys().hasAll(['teamId', 'teamName', 'opponentName', 'format', 'scheduledAt', 'status', 'isPublic', 'enteredBy', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly([
           'tournamentId', 'tournamentName', 'teamId', 'teamName', 'opponentName',
+          'teamAId', 'teamAName', 'teamBId', 'teamBName',
+          'stage', 'groupName', 'round', 'bracketSlot', 'seriesBestOf',
           'format', 'scheduledAt', 'status', 'nxfScore', 'opponentScore',
-          'maps', 'lineupUids', 'isPublic', 'enteredBy', 'createdAt', 'updatedAt'
+          'winnerTeamId', 'locked', 'resultSource', 'confirmedBy', 'confirmedAt',
+          'maps', 'games', 'lineupUids', 'isPublic', 'enteredBy', 'createdAt', 'updatedAt'
         ])
         && isOptionalString(data, 'tournamentId', 128)
         && isOptionalString(data, 'tournamentName', 100)
         && isValidId(data.teamId)
         && isNonEmptyString(data.teamName, 2, 60)
         && isNonEmptyString(data.opponentName, 2, 60)
+        && isOptionalString(data, 'teamAId', 128)
+        && isOptionalString(data, 'teamAName', 60)
+        && isOptionalString(data, 'teamBId', 128)
+        && isOptionalString(data, 'teamBName', 60)
+        && (!('stage' in data) || data.stage in ['groups', 'playoffs', 'final', 'standalone'])
+        && isOptionalString(data, 'groupName', 4)
+        && (!('round' in data) || (data.round is number && data.round >= 1 && data.round <= 32))
+        && isOptionalString(data, 'bracketSlot', 32)
+        && (!('seriesBestOf' in data) || (data.seriesBestOf is number && data.seriesBestOf >= 1 && data.seriesBestOf <= 9))
         && data.format in ['MD3', 'MD5', 'MD7']
         && data.scheduledAt is timestamp
         && data.status in ['scheduled', 'live_manual', 'completed', 'cancelled']
         && (!('nxfScore' in data) || (data.nxfScore is number && data.nxfScore >= 0 && data.nxfScore <= 10))
         && (!('opponentScore' in data) || (data.opponentScore is number && data.opponentScore >= 0 && data.opponentScore <= 10))
-        && (!('maps' in data) || (data.maps is list && data.maps.size() <= 7))
+        && isOptionalString(data, 'winnerTeamId', 128)
+        && (!('locked' in data) || data.locked is bool)
+        && (!('resultSource' in data) || data.resultSource in ['manual', 'auto_tracker', 'hybrid'])
+        && isOptionalString(data, 'confirmedBy', 128)
+        && (!('confirmedAt' in data) || data.confirmedAt is timestamp)
+        && (!('maps' in data) || (data.maps is list && data.maps.size() <= 9))
+        && (!('games' in data) || (data.games is list && data.games.size() <= 9))
         && (!('lineupUids' in data) || (data.lineupUids is list && data.lineupUids.size() <= 10))
         && data.isPublic is bool
         && isValidId(data.enteredBy)
@@ -817,6 +854,7 @@ service cloud.firestore {
         && incoming().enteredBy == existing().enteredBy
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
+        && (!('locked' in existing()) || existing().locked != true)
         && (
           isPrimaryAdmin()
           || (existing().status != 'completed' && (canManageTeam(existing().teamId) || hasDelegatedPermission('competitive.manage')))
@@ -979,7 +1017,8 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // 10. playerStats & playerStatsHistory (System-Only Writes from Render Backend)
+    // 10. playerStats, playerStatsHistory, Brawl Intelligence & Match Tracker
+    //     (Escrita exclusiva do Backend Admin SDK — clientes nunca escrevem)
     // =========================================================================
     match /playerStats/{uid} {
       allow get: if isValidId(uid);
@@ -990,6 +1029,50 @@ service cloud.firestore {
     match /playerStatsHistory/{snapshotId} {
       allow get: if isValidId(snapshotId);
       allow list: if true;
+      allow write: if false;
+    }
+
+    match /playerAnalytics/{uid} {
+      allow get: if isValidId(uid);
+      allow list: if true;
+      allow write: if false;
+    }
+
+    match /teamAnalytics/{teamId} {
+      allow get: if isValidId(teamId) && isOfficialMember();
+      allow list: if isOfficialMember();
+      allow write: if false;
+    }
+
+    match /brawlBattles/{battleId} {
+      allow get: if isValidId(battleId) && isOfficialMember();
+      allow list: if isOfficialMember();
+      allow write: if false;
+    }
+
+    match /matchTrackerCandidates/{candidateId} {
+      allow get: if isValidId(candidateId) && (
+        isPrimaryAdmin()
+        || hasDelegatedPermission('competitive.manage')
+        || isActiveUserWithRole('manager')
+        || isActiveUserWithRole('coach')
+      );
+      allow list: if isPrimaryAdmin()
+        || hasDelegatedPermission('competitive.manage')
+        || isActiveUserWithRole('manager')
+        || isActiveUserWithRole('coach');
+      allow write: if false;
+    }
+
+    match /brawlSyncLogs/{logId} {
+      allow get: if isValidId(logId) && (
+        isAnyAdmin()
+        || hasDelegatedPermission('competitive.manage')
+        || hasDelegatedPermission('system.manage')
+      );
+      allow list: if isAnyAdmin()
+        || hasDelegatedPermission('competitive.manage')
+        || hasDelegatedPermission('system.manage');
       allow write: if false;
     }
 

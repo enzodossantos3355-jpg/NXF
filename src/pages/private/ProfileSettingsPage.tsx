@@ -1,13 +1,19 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ExternalLink, KeyRound, Save, Upload } from 'lucide-react';
+import { ExternalLink, Image as ImageIcon, KeyRound, Save, Trash2, Upload } from 'lucide-react';
 import { doc, serverTimestamp, updateDoc } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../../lib/firebase';
 import { apiFetch, compressImageToDataUrl } from '../../lib/apiClient';
 import { useAuth } from '../../context/AuthContext';
+import { SafeImage } from '../../components/common/BrandMark';
 import { BLUEPRINT_LIMITS, type ProfileLayout } from '../../types/nxf';
 
 const MAX_PROFILE_IMAGE_BYTES = 5 * 1024 * 1024;
+
+function extractOwnedMediaId(url: string): string | null {
+  const match = /\/api\/media\/([a-zA-Z0-9_-]{3,128})(?:[?#].*)?$/.exec(url.trim());
+  return match ? match[1] : null;
+}
 
 export function ProfileSettingsPage() {
   const { firebaseUser, userDoc, publicProfile, capabilities, changePassword } = useAuth();
@@ -87,7 +93,9 @@ export function ProfileSettingsPage() {
       });
       if (kind === 'avatar') setAvatarUrl(res.url);
       else setBannerUrl(res.url);
-      setStatusMsg('Imagem otimizada e salva via backend Render (compatível com plano Spark). Clique em Salvar para aplicar.');
+      setStatusMsg(
+        `${kind === 'avatar' ? 'Foto de perfil' : 'Banner'} otimizado e enviado com segurança. Clique em "Salvar alterações" para aplicar.`
+      );
     } catch (err) {
       setErrorMsg(
         err instanceof Error
@@ -97,6 +105,21 @@ export function ProfileSettingsPage() {
     } finally {
       setUploading(null);
     }
+  };
+
+  const handleRemoveImage = async (kind: 'avatar' | 'banner') => {
+    setErrorMsg('');
+    setStatusMsg('');
+    const currentUrl = kind === 'avatar' ? avatarUrl : bannerUrl;
+    const mediaId = extractOwnedMediaId(currentUrl);
+    if (mediaId) {
+      await apiFetch(`/api/media/${mediaId}`, { method: 'DELETE' }).catch(() => undefined);
+    }
+    if (kind === 'avatar') setAvatarUrl('');
+    else setBannerUrl('');
+    setStatusMsg(
+      `${kind === 'avatar' ? 'Foto de perfil' : 'Banner'} removido. Clique em "Salvar alterações" para confirmar.`
+    );
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -173,13 +196,13 @@ export function ProfileSettingsPage() {
         <div>
           <h1 className="font-display text-3xl font-bold text-white">Meu Perfil</h1>
           <p className="text-xs text-[#A1A1AA]">
-            Personalize sua apresentação mantendo as cores oficiais NXF. Cargos e conquistas oficiais são geridos pela diretoria.
+            Personalize sua apresentação mantendo as cores oficiais NXF. Imagens são enviadas diretamente para o servidor com validação e otimização automática.
           </p>
         </div>
         {publicProfile && (
           <Link
             to={`/membro/${firebaseUser?.uid}`}
-            className="inline-flex items-center gap-1.5 px-3 py-2 bg-[#15151A] border border-white/10 rounded-md text-xs font-medium text-white hover:bg-[#202027]"
+            className="inline-flex items-center gap-1.5 px-3 py-2 bg-[#15151A] border border-white/10 rounded-md text-xs font-medium text-white hover:bg-[#202027] shrink-0"
           >
             Ver perfil público
             <ExternalLink className="w-3.5 h-3.5" />
@@ -242,61 +265,110 @@ export function ProfileSettingsPage() {
               placeholder="#ABC123"
               className="w-full bg-[#0D0D10] border border-white/12 rounded-md px-3 py-2 text-sm font-mono-tabular text-white focus:border-[#DC172B] focus:outline-none"
             />
-            <p className="text-[11px] text-[#71717A]">
-              Code de entrada: {userDoc?.code || '—'} · Tag: {userDoc?.brawlTagStatus || 'none'}
+            <p className="text-[11px] text-[#71717A] font-mono-tabular">
+              Code: {userDoc?.code || '—'} · Status Tag: {userDoc?.brawlTagStatus || 'none'}
             </p>
           </div>
         </div>
 
         {publicProfile ? (
           <>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-white/8">
-              <div className="space-y-2">
-                <label className="block text-xs font-medium text-[#A1A1AA]">
-                  Avatar (URL externa ou Upload otimizado)
-                </label>
-                <input
-                  type="url"
-                  maxLength={BLUEPRINT_LIMITS.URL_MAX}
-                  value={avatarUrl}
-                  onChange={(e) => setAvatarUrl(e.target.value)}
-                  placeholder="https://..."
-                  className="w-full bg-[#0D0D10] border border-white/12 rounded-md px-3 py-2 text-xs text-white"
-                />
-                <label className="inline-flex items-center gap-2 px-3 py-1.5 bg-[#202027] hover:bg-[#2B2B35] border border-white/10 rounded text-xs cursor-pointer">
-                  <Upload className="w-3.5 h-3.5" />
-                  {uploading === 'avatar' ? 'Enviando...' : 'Enviar arquivo'}
-                  <input
-                    type="file"
-                    accept="image/jpeg,image/png,image/webp"
-                    className="hidden"
-                    onChange={(e) => void handleImageUpload(e.target.files?.[0], 'avatar')}
+            {/* Upload direto de Avatar e Banner (sem campos de URL externa) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 pt-4 border-t border-white/8">
+              <div className="bg-[#0D0D10] border border-white/8 rounded-md p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-white">Foto de Perfil (Avatar)</span>
+                  <span className="text-[11px] text-[#71717A]">JPG, PNG ou WebP · até 5 MB</span>
+                </div>
+                <div className="flex items-center gap-4">
+                  <SafeImage
+                    src={avatarUrl}
+                    alt={displayName || 'Avatar'}
+                    className="w-16 h-16 rounded-lg object-cover border border-white/12 bg-[#15151A] shrink-0"
+                    fallbackLabel={displayName || 'NXF'}
                   />
-                </label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#202027] hover:bg-[#2B2B35] border border-white/10 rounded text-xs font-medium text-white cursor-pointer">
+                      <Upload className="w-3.5 h-3.5" />
+                      {uploading === 'avatar'
+                        ? 'Otimizando...'
+                        : avatarUrl
+                          ? 'Trocar foto'
+                          : 'Enviar foto'}
+                      <input
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        className="hidden"
+                        disabled={uploading !== null}
+                        onChange={(e) => {
+                          void handleImageUpload(e.target.files?.[0], 'avatar');
+                          e.target.value = '';
+                        }}
+                      />
+                    </label>
+                    {avatarUrl && (
+                      <button
+                        type="button"
+                        onClick={() => void handleRemoveImage('avatar')}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-[#15151A] hover:bg-[#DC172B]/20 border border-white/10 rounded text-xs text-[#A1A1AA] hover:text-white"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        Remover
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
 
-              <div className="space-y-2">
-                <label className="block text-xs font-medium text-[#A1A1AA]">
-                  Banner do Perfil (URL externa ou Upload otimizado)
-                </label>
-                <input
-                  type="url"
-                  maxLength={BLUEPRINT_LIMITS.URL_MAX}
-                  value={bannerUrl}
-                  onChange={(e) => setBannerUrl(e.target.value)}
-                  placeholder="https://..."
-                  className="w-full bg-[#0D0D10] border border-white/12 rounded-md px-3 py-2 text-xs text-white"
-                />
-                <label className="inline-flex items-center gap-2 px-3 py-1.5 bg-[#202027] hover:bg-[#2B2B35] border border-white/10 rounded text-xs cursor-pointer">
-                  <Upload className="w-3.5 h-3.5" />
-                  {uploading === 'banner' ? 'Enviando...' : 'Enviar arquivo'}
-                  <input
-                    type="file"
-                    accept="image/jpeg,image/png,image/webp"
-                    className="hidden"
-                    onChange={(e) => void handleImageUpload(e.target.files?.[0], 'banner')}
-                  />
-                </label>
+              <div className="bg-[#0D0D10] border border-white/8 rounded-md p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-white">Banner do Perfil</span>
+                  <span className="text-[11px] text-[#71717A]">16:9 recomendado · até 5 MB</span>
+                </div>
+                <div className="relative h-16 w-full rounded-md overflow-hidden border border-white/10 bg-[#15151A] flex items-center justify-center">
+                  {bannerUrl ? (
+                    <SafeImage
+                      src={bannerUrl}
+                      alt="Prévia do banner"
+                      className="w-full h-full object-cover"
+                      fallbackLabel="Banner"
+                    />
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 text-[11px] text-[#71717A]">
+                      <ImageIcon className="w-3.5 h-3.5" /> Nenhum banner enviado
+                    </span>
+                  )}
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#202027] hover:bg-[#2B2B35] border border-white/10 rounded text-xs font-medium text-white cursor-pointer">
+                    <Upload className="w-3.5 h-3.5" />
+                    {uploading === 'banner'
+                      ? 'Otimizando...'
+                      : bannerUrl
+                        ? 'Trocar banner'
+                        : 'Enviar banner'}
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp"
+                      className="hidden"
+                      disabled={uploading !== null}
+                      onChange={(e) => {
+                        void handleImageUpload(e.target.files?.[0], 'banner');
+                        e.target.value = '';
+                      }}
+                    />
+                  </label>
+                  {bannerUrl && (
+                    <button
+                      type="button"
+                      onClick={() => void handleRemoveImage('banner')}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-[#15151A] hover:bg-[#DC172B]/20 border border-white/10 rounded text-xs text-[#A1A1AA] hover:text-white"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Remover
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -382,7 +454,7 @@ export function ProfileSettingsPage() {
         <div className="pt-2 flex justify-end">
           <button
             type="submit"
-            disabled={saving}
+            disabled={saving || uploading !== null}
             className="inline-flex items-center gap-2 px-5 py-2.5 bg-[#DC172B] hover:bg-[#EF3340] disabled:opacity-50 text-white text-xs font-semibold rounded-md"
           >
             <Save className="w-4 h-4" />
